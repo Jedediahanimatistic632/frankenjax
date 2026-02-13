@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/fj-core",
+  "crates/fj-interpreters",
+  "crates/fj-dispatch",
+  "crates/fj-lax",
+  "crates/fj-cache",
+  "crates/fj-runtime",
+  "crates/fj-conformance",
+  "crates/fj-ledger",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"

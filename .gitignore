@@ -1,0 +1,39 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Beads local state
+.beads/
+
+# BV local config and caches
+.bv/
+
+# macOS resource forks
+._*
+.DS_Store
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Legacy JAX oracle (large upstream clone, not part of this project)
+legacy_jax_code/
+
+# Exemplar reference specs (not part of this project)
+references/
+
+# Environment and secrets
+.env
+.env.*
+
+# Original PNG (converted to webp)
+*.png

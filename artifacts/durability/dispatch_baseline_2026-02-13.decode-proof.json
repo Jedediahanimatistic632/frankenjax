@@ -1,0 +1,16 @@
+{
+  "proof_id": "decode-proof-749df4d3aeef61a8",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/dispatch_baseline_2026-02-13.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/performance/dispatch_baseline_2026-02-13.md",
+  "expected_sha256_hex": "bc625e29797b3d65eb60cbb2f0e9a5a5c03921844fd3eafda4a6a85279e8882e",
+  "decoded_sha256_hex": "bc625e29797b3d65eb60cbb2f0e9a5a5c03921844fd3eafda4a6a85279e8882e",
+  "dropped_symbols": [
+    "kind:source:sbn:0:esi:0",
+    "kind:source:sbn:0:esi:1",
+    "kind:source:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 14,
+  "recovered": true,
+  "details": "drop-kind=source count=3; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1770974156521
+}

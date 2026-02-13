@@ -1,0 +1,226 @@
+{
+  "capture_mode": "fallback_analytical",
+  "cases": [
+    {
+      "args": [
+        {
+          "kind": "scalar_i64",
+          "value": 2
+        },
+        {
+          "kind": "scalar_i64",
+          "value": 5
+        }
+      ],
+      "atol": 1e-06,
+      "case_id": "jit_add_scalar",
+      "expected": [
+        {
+          "kind": "scalar_i64",
+          "value": 7
+        }
+      ],
+      "family": "jit",
+      "mode": "strict",
+      "program": "add2",
+      "rtol": 1e-06,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 3.0
+        }
+      ],
+      "atol": 0.001,
+      "case_id": "grad_square_scalar",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 6.0
+        }
+      ],
+      "family": "grad",
+      "mode": "strict",
+      "program": "square",
+      "rtol": 0.001,
+      "transforms": [
+        "grad"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 3.0
+        }
+      ],
+      "atol": 0.001,
+      "case_id": "grad_square_plus_linear_scalar",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 8.0
+        }
+      ],
+      "family": "grad",
+      "mode": "strict",
+      "program": "square_plus_linear",
+      "rtol": 0.001,
+      "transforms": [
+        "grad"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "vector_i64",
+          "values": [
+            1,
+            2,
+            3
+          ]
+        }
+      ],
+      "atol": 1e-06,
+      "case_id": "vmap_add_one_vector",
+      "expected": [
+        {
+          "kind": "vector_i64",
+          "values": [
+            2,
+            3,
+            4
+          ]
+        }
+      ],
+      "family": "vmap",
+      "mode": "strict",
+      "program": "add_one",
+      "rtol": 1e-06,
+      "transforms": [
+        "vmap"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "vector_f64",
+          "values": [
+            1.0,
+            2.0,
+            3.0
+          ]
+        }
+      ],
+      "atol": 0.001,
+      "case_id": "vmap_grad_square_vector",
+      "expected": [
+        {
+          "kind": "vector_f64",
+          "values": [
+            2.0,
+            4.0,
+            6.0
+          ]
+        }
+      ],
+      "family": "vmap",
+      "mode": "strict",
+      "program": "square",
+      "rtol": 0.001,
+      "transforms": [
+        "vmap",
+        "grad"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 3.0
+        }
+      ],
+      "atol": 0.001,
+      "case_id": "jit_grad_square_plus_linear",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 8.0
+        }
+      ],
+      "family": "jit",
+      "mode": "strict",
+      "program": "square_plus_linear",
+      "rtol": 0.001,
+      "transforms": [
+        "jit",
+        "grad"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 3.0
+        }
+      ],
+      "atol": 0.001,
+      "case_id": "grad_jit_square_plus_linear",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 8.0
+        }
+      ],
+      "family": "grad",
+      "mode": "strict",
+      "program": "square_plus_linear",
+      "rtol": 0.001,
+      "transforms": [
+        "grad",
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "vector_i64",
+          "values": [
+            1,
+            2,
+            3
+          ]
+        }
+      ],
+      "atol": 1e-06,
+      "case_id": "jit_vmap_add_one_vector",
+      "expected": [
+        {
+          "kind": "vector_i64",
+          "values": [
+            2,
+            3,
+            4
+          ]
+        }
+      ],
+      "family": "jit",
+      "mode": "strict",
+      "program": "add_one",
+      "rtol": 1e-06,
+      "transforms": [
+        "jit",
+        "vmap"
+      ]
+    }
+  ],
+  "generated_at_unix_ms": 1770973927573,
+  "generated_by": "legacy_jax_capture_script",
+  "oracle_root": "/data/projects/frankenjax/legacy_jax_code/jax",
+  "schema_version": "frankenjax.transform-fixtures.v1",
+  "strict_capture": false
+}

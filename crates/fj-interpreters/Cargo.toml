@@ -1,0 +1,8 @@
+[package]
+name = "fj-interpreters"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fj-core = { path = "../fj-core" }
+fj-lax = { path = "../fj-lax" }

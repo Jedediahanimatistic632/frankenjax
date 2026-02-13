@@ -1,0 +1,8 @@
+[package]
+name = "fj-cache"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fj-core = { path = "../fj-core" }
+sha2 = "0.10.8"

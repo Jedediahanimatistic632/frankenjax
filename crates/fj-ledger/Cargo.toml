@@ -1,0 +1,8 @@
+[package]
+name = "fj-ledger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fj-core = { path = "../fj-core" }
+serde = { version = "1.0.218", features = ["derive"] }

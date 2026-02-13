@@ -1,0 +1,17 @@
+[package]
+name = "fj-dispatch"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fj-cache = { path = "../fj-cache" }
+fj-core = { path = "../fj-core" }
+fj-interpreters = { path = "../fj-interpreters" }
+fj-ledger = { path = "../fj-ledger" }
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "dispatch_baseline"
+harness = false

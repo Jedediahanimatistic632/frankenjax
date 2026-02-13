@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/dispatch_baseline_2026-02-13.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/performance/dispatch_baseline_2026-02-13.md",
+  "expected_sha256_hex": "bc625e29797b3d65eb60cbb2f0e9a5a5c03921844fd3eafda4a6a85279e8882e",
+  "decoded_sha256_hex": "bc625e29797b3d65eb60cbb2f0e9a5a5c03921844fd3eafda4a6a85279e8882e",
+  "decoded_matches_expected": true,
+  "total_symbols": 17,
+  "source_symbols": 13,
+  "repair_symbols": 4,
+  "generated_at_unix_ms": 1770974156521
+}

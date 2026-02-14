@@ -1,0 +1,80 @@
+{
+  "schema_version": "frankenjax.contract-table.v1",
+  "packet_id": "FJ-P2C-004",
+  "generated_at_unix_ms": 1739520000000,
+  "mode_matrix": [
+    {
+      "mode": "strict",
+      "contract_rows": [
+        {
+          "row_id": "dispatch.strict.001",
+          "title": "Deterministic dispatch for equivalent inputs",
+          "preconditions": [
+            "identical TTL",
+            "identical compile_options",
+            "identical args"
+          ],
+          "guarantees": [
+            "equal outputs",
+            "identical cache key"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "dispatch_contract_violation"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "cache_key",
+              "reason_code"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        }
+      ]
+    },
+    {
+      "mode": "hardened",
+      "contract_rows": [
+        {
+          "row_id": "dispatch.hardened.001",
+          "title": "Allowlisted recovery for oversized transform stacks",
+          "preconditions": [
+            "transform stack depth exceeds guard threshold"
+          ],
+          "guarantees": [
+            "guard log emitted",
+            "request remains deterministic"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "transform_stack_depth_guard"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "stack_depth",
+              "reason_code"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        }
+      ]
+    }
+  ],
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "allowlisted_repair"
+  },
+  "invariants": [
+    {
+      "invariant_id": "inv.dispatch.order",
+      "statement": "Transform composition order is preserved end-to-end.",
+      "proof_artifact_refs": [
+        "artifacts/evidence/FJ-P2C-004/transform_order_proof.json"
+      ]
+    }
+  ]
+}

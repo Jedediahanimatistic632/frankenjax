@@ -1,0 +1,20 @@
+{
+  "schema_version": "frankenjax.fixture-manifest.v1",
+  "packet_id": "FJ-P2C-004",
+  "generated_at_unix_ms": 1739520000000,
+  "fixtures": [
+    {
+      "fixture_id": "dispatch_strict_smoke",
+      "family": "dispatch",
+      "path": "crates/fj-conformance/fixtures/transforms/legacy_transform_cases.v1.json",
+      "oracle_source": "jax/_src/dispatch.py",
+      "mode": "strict",
+      "checksum_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_outcome": "pass",
+      "tags": [
+        "smoke",
+        "non-regression"
+      ]
+    }
+  ]
+}

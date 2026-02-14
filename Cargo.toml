@@ -11,6 +11,7 @@ members = [
   "crates/fj-ledger",
   "crates/fj-ad",
   "crates/fj-egraph",
+  "crates/fj-test-utils",
 ]
 
 [workspace.package]

@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frankenjax.dev/schemas/risk_note.v1.schema.json",
+  "title": "FrankenJAX Risk Note v1",
+  "description": "Per-packet risk record with mitigations and residual risk status.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "packet_id",
+    "generated_at_unix_ms",
+    "threat_surface_summary",
+    "risks",
+    "top_open_risk_id",
+    "signoff"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "frankenjax.risk-note.v1"
+    },
+    "packet_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at_unix_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "threat_surface_summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "risks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "risk_id",
+          "category",
+          "description",
+          "likelihood",
+          "impact",
+          "mitigation_status",
+          "mitigations",
+          "residual_risk",
+          "evidence_refs"
+        ],
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "compatibility",
+              "security",
+              "performance",
+              "correctness",
+              "operability"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "likelihood": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "impact": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "mitigation_status": {
+            "type": "string",
+            "enum": [
+              "planned",
+              "in_progress",
+              "mitigated",
+              "accepted"
+            ]
+          },
+          "mitigations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "residual_risk": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_refs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "top_open_risk_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "signoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "author",
+        "approved",
+        "signed_at"
+      ],
+      "properties": {
+        "author": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "signed_at": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

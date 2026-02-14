@@ -714,4 +714,17 @@ mod tests {
         let err = verify_transform_composition(&ttl).expect_err("double grad should fail");
         assert!(format!("{err}").contains("at most one grad"));
     }
+
+    #[test]
+    fn test_core_test_log_schema_contract() {
+        let fixture_id =
+            fj_test_utils::fixture_id_from_json(&(1_u32, 2_u32)).expect("fixture digest");
+        let log = fj_test_utils::TestLogV1::unit(
+            fj_test_utils::test_id(module_path!(), "test_core_test_log_schema_contract"),
+            fixture_id,
+            fj_test_utils::TestMode::Strict,
+            fj_test_utils::TestResult::Pass,
+        );
+        assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+    }
 }

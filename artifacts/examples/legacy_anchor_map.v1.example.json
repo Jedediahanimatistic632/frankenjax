@@ -1,0 +1,26 @@
+{
+  "schema_version": "frankenjax.legacy-anchor-map.v1",
+  "packet_id": "FJ-P2C-004",
+  "generated_at_unix_ms": 1739520000000,
+  "generated_by": "CobaltMountain",
+  "legacy_oracle_root": "/data/projects/frankenjax/legacy_jax_code/jax",
+  "anchors": [
+    {
+      "anchor_id": "dispatch.apply_primitive",
+      "legacy_path": "jax/_src/dispatch.py",
+      "legacy_symbol": "apply_primitive",
+      "behavior_summary": "Routes primitive execution via runtime backend and traces effect ordering.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 102,
+        "end": 174
+      },
+      "confidence": "high",
+      "notes": "Mapped to fj-dispatch execute_with_transforms path."
+    }
+  ],
+  "extraction_invariants": [
+    "transform order preserved from ledger stack",
+    "unknown incompatible features fail closed in strict mode"
+  ]
+}

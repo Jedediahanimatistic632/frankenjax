@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frankenjax.dev/schemas/test_log.v1.schema.json",
+  "title": "FrankenJAX Test Log v1",
+  "description": "Canonical structured test log format for unit/property/e2e execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "test_id",
+    "fixture_id",
+    "seed",
+    "mode",
+    "env",
+    "artifact_refs",
+    "result",
+    "duration_ms",
+    "details",
+    "phase_timings"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "frankenjax.test-log.v1"
+    },
+    "test_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fixture_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "seed": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "strict",
+        "hardened"
+      ]
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rust_version",
+        "os",
+        "cargo_target_dir",
+        "timestamp_unix_ms"
+      ],
+      "properties": {
+        "rust_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "os": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cargo_target_dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timestamp_unix_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "skip"
+      ]
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "details": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "phase_timings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "setup_ms",
+        "execute_ms",
+        "verify_ms",
+        "teardown_ms"
+      ],
+      "properties": {
+        "setup_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "execute_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verify_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "teardown_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

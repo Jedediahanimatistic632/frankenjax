@@ -308,17 +308,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_ad_test_log_schema_contract() {
+        let fixture_id =
+            fj_test_utils::fixture_id_from_json(&(3_u32, 9_u32)).expect("fixture digest");
+        let log = fj_test_utils::TestLogV1::unit(
+            fj_test_utils::test_id(module_path!(), "test_ad_test_log_schema_contract"),
+            fixture_id,
+            fj_test_utils::TestMode::Strict,
+            fj_test_utils::TestResult::Pass,
+        );
+        assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+    }
+
     mod proptest_tests {
         use super::*;
         use fj_interpreters::eval_jaxpr;
         use proptest::prelude::*;
 
         proptest! {
+            #![proptest_config(proptest::test_runner::Config::with_cases(
+                fj_test_utils::property_test_case_count()
+            ))]
             #[test]
-            fn grad_x_squared_matches_2x(x in prop::num::f64::NORMAL.prop_filter(
+            fn prop_ad_grad_square_matches_two_x(x in prop::num::f64::NORMAL.prop_filter(
                 "finite and not too large",
                 |x| x.is_finite() && x.abs() < 1e6
             )) {
+                let _seed = fj_test_utils::capture_proptest_seed();
                 let jaxpr = build_program(ProgramSpec::Square);
                 let symbolic = grad_first(&jaxpr, &[Value::scalar_f64(x)])
                     .expect("symbolic grad");
@@ -330,7 +347,7 @@ mod tests {
             }
 
             #[test]
-            fn symbolic_grad_matches_numerical(x in prop::num::f64::NORMAL.prop_filter(
+            fn prop_ad_symbolic_grad_matches_numerical(x in prop::num::f64::NORMAL.prop_filter(
                 "finite and moderate",
                 |x| x.is_finite() && x.abs() < 1e3
             )) {

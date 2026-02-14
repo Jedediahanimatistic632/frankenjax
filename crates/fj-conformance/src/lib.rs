@@ -326,6 +326,8 @@ pub struct TransformCaseReport {
     pub case_id: String,
     pub family: FixtureFamily,
     pub mode: FixtureMode,
+    pub comparator: ComparatorKind,
+    pub drift_classification: DriftClassification,
     pub matched: bool,
     pub expected_json: String,
     pub actual_json: Option<String>,
@@ -339,6 +341,25 @@ pub struct TransformParityReport {
     pub matched_cases: usize,
     pub mismatched_cases: usize,
     pub reports: Vec<TransformCaseReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparatorKind {
+    Exact,
+    ApproxAtolRtol,
+    ShapeOnly,
+    TypeOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftClassification {
+    Pass,
+    Regression,
+    Improvement,
+    Flake,
+    Timeout,
 }
 
 pub fn read_transform_fixture_bundle(
@@ -372,6 +393,37 @@ pub fn run_transform_fixture_bundle(
     }
 }
 
+#[must_use]
+pub fn emit_parity_markdown(report: &TransformParityReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Transform Parity Report\n\n");
+    out.push_str("| Metric | Value |\n");
+    out.push_str("|---|---|\n");
+    out.push_str(&format!("| Schema | `{}` |\n", report.schema_version));
+    out.push_str(&format!("| Total Cases | {} |\n", report.total_cases));
+    out.push_str(&format!("| Matched Cases | {} |\n", report.matched_cases));
+    out.push_str(&format!(
+        "| Mismatched Cases | {} |\n\n",
+        report.mismatched_cases
+    ));
+
+    out.push_str("| Case ID | Family | Mode | Comparator | Drift | Matched |\n");
+    out.push_str("|---|---|---|---|---|---|\n");
+    for case in &report.reports {
+        out.push_str(&format!(
+            "| {} | {:?} | {:?} | {:?} | {:?} | {} |\n",
+            case.case_id,
+            case.family,
+            case.mode,
+            case.comparator,
+            case.drift_classification,
+            case.matched
+        ));
+    }
+
+    out
+}
+
 fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseReport {
     let runtime_args = case
         .args
@@ -389,6 +441,11 @@ fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseRepor
                 case_id: case.case_id.clone(),
                 family: case.family,
                 mode: case.mode,
+                comparator: ComparatorKind::ApproxAtolRtol,
+                drift_classification: classify_drift(
+                    false,
+                    Some("fixture argument conversion failed"),
+                ),
                 matched: false,
                 expected_json,
                 actual_json: None,
@@ -436,6 +493,15 @@ fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseRepor
                 case_id: case.case_id.clone(),
                 family: case.family,
                 mode: case.mode,
+                comparator: ComparatorKind::ApproxAtolRtol,
+                drift_classification: classify_drift(
+                    matched,
+                    if matched {
+                        None
+                    } else {
+                        Some("output mismatch")
+                    },
+                ),
                 matched,
                 expected_json,
                 actual_json: Some(actual_json),
@@ -450,6 +516,8 @@ fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseRepor
             case_id: case.case_id.clone(),
             family: case.family,
             mode: case.mode,
+            comparator: ComparatorKind::ApproxAtolRtol,
+            drift_classification: classify_drift(false, Some(&err.to_string())),
             matched: false,
             expected_json,
             actual_json: None,
@@ -463,13 +531,25 @@ fn approx_equal(expected: f64, actual: f64, atol: f64, rtol: f64) -> bool {
     (expected - actual).abs() <= tolerance
 }
 
+fn classify_drift(matched: bool, error: Option<&str>) -> DriftClassification {
+    if matched {
+        return DriftClassification::Pass;
+    }
+
+    if error.is_some_and(|detail| detail.to_ascii_lowercase().contains("timeout")) {
+        return DriftClassification::Timeout;
+    }
+
+    DriftClassification::Regression
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FixtureFamily, FixtureMode, FixtureProgram, FixtureTransform, FixtureValue, HarnessConfig,
-        ParityCase, TransformFixtureBundle, TransformFixtureCase, collect_json_fixtures,
-        default_fixture_manifest, evaluate_parity, read_fixture_note, run_smoke,
-        run_transform_fixture_bundle,
+        DriftClassification, FixtureFamily, FixtureMode, FixtureProgram, FixtureTransform,
+        FixtureValue, HarnessConfig, ParityCase, TransformFixtureBundle, TransformFixtureCase,
+        classify_drift, collect_json_fixtures, default_fixture_manifest, emit_parity_markdown,
+        evaluate_parity, read_fixture_note, run_smoke, run_transform_fixture_bundle,
     };
 
     #[test]
@@ -554,5 +634,59 @@ mod tests {
         assert_eq!(report.total_cases, 1);
         assert_eq!(report.matched_cases, 1);
         assert_eq!(report.mismatched_cases, 0);
+    }
+
+    #[test]
+    fn test_conformance_test_log_schema_contract() {
+        let fixture_id =
+            fj_test_utils::fixture_id_from_json(&("conformance", "smoke")).expect("digest");
+        let log = fj_test_utils::TestLogV1::unit(
+            fj_test_utils::test_id(module_path!(), "test_conformance_test_log_schema_contract"),
+            fixture_id,
+            fj_test_utils::TestMode::Strict,
+            fj_test_utils::TestResult::Pass,
+        );
+        assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_drift_classification_timeout_and_regression() {
+        assert_eq!(
+            classify_drift(false, Some("timeout waiting for oracle")),
+            DriftClassification::Timeout
+        );
+        assert_eq!(
+            classify_drift(false, Some("shape mismatch")),
+            DriftClassification::Regression
+        );
+        assert_eq!(classify_drift(true, None), DriftClassification::Pass);
+    }
+
+    #[test]
+    fn test_parity_markdown_emitter_includes_summary() {
+        let cfg = HarnessConfig::default_paths();
+        let bundle = TransformFixtureBundle {
+            schema_version: "frankenjax.transform-fixtures.v1".to_owned(),
+            generated_by: "unit-test".to_owned(),
+            generated_at_unix_ms: 0,
+            cases: vec![TransformFixtureCase {
+                case_id: "jit_add_scalar_markdown".to_owned(),
+                family: FixtureFamily::Jit,
+                mode: FixtureMode::Strict,
+                program: FixtureProgram::Add2,
+                transforms: vec![FixtureTransform::Jit],
+                args: vec![
+                    FixtureValue::ScalarI64 { value: 1 },
+                    FixtureValue::ScalarI64 { value: 2 },
+                ],
+                expected: vec![FixtureValue::ScalarI64 { value: 3 }],
+                atol: 1e-6,
+                rtol: 1e-6,
+            }],
+        };
+        let report = run_transform_fixture_bundle(&cfg, &bundle);
+        let markdown = emit_parity_markdown(&report);
+        assert!(markdown.contains("Transform Parity Report"));
+        assert!(markdown.contains("jit_add_scalar_markdown"));
     }
 }

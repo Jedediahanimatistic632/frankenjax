@@ -78,4 +78,17 @@ mod tests {
         let model = RuntimeAdmissionModel::new(CompatibilityMode::Strict);
         assert_eq!(model.decide(0.95), DecisionAction::Kill);
     }
+
+    #[test]
+    fn test_runtime_test_log_schema_contract() {
+        let fixture_id =
+            fj_test_utils::fixture_id_from_json(&("runtime", "admission")).expect("digest");
+        let log = fj_test_utils::TestLogV1::unit(
+            fj_test_utils::test_id(module_path!(), "test_runtime_test_log_schema_contract"),
+            fixture_id,
+            fj_test_utils::TestMode::Strict,
+            fj_test_utils::TestResult::Pass,
+        );
+        assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+    }
 }

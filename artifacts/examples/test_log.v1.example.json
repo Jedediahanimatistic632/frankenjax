@@ -1,0 +1,25 @@
+{
+  "schema_version": "frankenjax.test-log.v1",
+  "test_id": "fj_cache::tests::test_cache_key_stability_hardened",
+  "fixture_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "seed": 424242,
+  "mode": "strict",
+  "env": {
+    "rust_version": "rustc 1.83.0",
+    "os": "linux",
+    "cargo_target_dir": "/tmp/frankenjax-verify-target",
+    "timestamp_unix_ms": 1739520000000
+  },
+  "artifact_refs": [
+    "artifacts/evidence/FJ-P2C-005/cache-key.parity.json"
+  ],
+  "result": "pass",
+  "duration_ms": 12,
+  "details": null,
+  "phase_timings": {
+    "setup_ms": 1,
+    "execute_ms": 8,
+    "verify_ms": 2,
+    "teardown_ms": 1
+  }
+}

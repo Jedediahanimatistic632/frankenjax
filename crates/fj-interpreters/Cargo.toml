@@ -9,5 +9,6 @@ fj-lax = { path = "../fj-lax" }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]
+fj-test-utils = { path = "../fj-test-utils" }
 proptest = { workspace = true }
 smallvec = { workspace = true }

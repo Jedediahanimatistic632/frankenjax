@@ -1,0 +1,6 @@
+{
+  "schema_version": "frankenjax.test-log.v1",
+  "test_id": "fj_cache::tests::test_cache_key_stability_hardened",
+  "mode": "strict",
+  "result": "pass"
+}

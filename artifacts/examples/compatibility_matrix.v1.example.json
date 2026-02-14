@@ -1,0 +1,23 @@
+{
+  "schema_version": "frankenjax.compatibility-matrix.v1",
+  "generated_at_unix_ms": 1739520000000,
+  "scoped_api_version": "v1",
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "allowlisted_repair"
+  },
+  "rows": [
+    {
+      "subsystem": "fj-dispatch",
+      "jax_behavior": "jit/grad/vmap transform composition order",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guarded-recovery",
+      "drift_policy": "fail-closed",
+      "tests": [
+        "crates/fj-dispatch/src/lib.rs",
+        "crates/fj-conformance/tests/transforms.rs"
+      ],
+      "notes": "Hardened mode permits allowlisted recovery only with deterministic audit logs."
+    }
+  ]
+}

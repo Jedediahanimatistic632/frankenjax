@@ -1,0 +1,30 @@
+{
+  "schema_version": "frankenjax.risk-note.v1",
+  "packet_id": "FJ-P2C-004",
+  "generated_at_unix_ms": 1739520000000,
+  "threat_surface_summary": "Dispatch path exposed to transform-order confusion and malformed shape signatures.",
+  "risks": [
+    {
+      "risk_id": "risk.dispatch.cache-confusion",
+      "category": "security",
+      "description": "Cache confusion could return stale compiled artifacts for incompatible ledgers.",
+      "likelihood": "medium",
+      "impact": "high",
+      "mitigation_status": "in_progress",
+      "mitigations": [
+        "Cache key binds transform stack + jaxpr fingerprint",
+        "Strict mode rejects unknown incompatible features"
+      ],
+      "residual_risk": "Medium until adversarial fixture coverage expands.",
+      "evidence_refs": [
+        "artifacts/evidence/FJ-P2C-004/cache_key_audit.md"
+      ]
+    }
+  ],
+  "top_open_risk_id": "risk.dispatch.cache-confusion",
+  "signoff": {
+    "author": "CobaltMountain",
+    "approved": false,
+    "signed_at": "2026-02-14T08:00:00Z"
+  }
+}

@@ -86,8 +86,12 @@ mod tests {
     use crate::{TraceTransformLedger, verify_transform_composition};
 
     proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(
+            fj_test_utils::property_test_case_count()
+        ))]
         #[test]
-        fn fingerprint_determinism(prim in arb_primitive()) {
+        fn prop_ir_fingerprint_determinism(prim in arb_primitive()) {
+            let _seed = fj_test_utils::capture_proptest_seed();
             let jaxpr = Jaxpr::new(
                 vec![VarId(1)],
                 vec![],
@@ -105,7 +109,7 @@ mod tests {
         }
 
         #[test]
-        fn composition_signature_determinism(transform in arb_transform()) {
+        fn prop_ttl_composition_signature_determinism(transform in arb_transform()) {
             let jaxpr = Jaxpr::new(vec![VarId(1)], vec![], vec![VarId(1)], vec![]);
             let mut ttl = TraceTransformLedger::new(jaxpr);
             ttl.push_transform(transform, "evidence");
@@ -115,7 +119,7 @@ mod tests {
         }
 
         #[test]
-        fn composition_proof_valid_single_transform(transform in arb_transform()) {
+        fn prop_ttl_single_transform_composition_valid(transform in arb_transform()) {
             let jaxpr = Jaxpr::new(vec![VarId(1)], vec![], vec![VarId(1)], vec![]);
             let mut ttl = TraceTransformLedger::new(jaxpr);
             ttl.push_transform(transform, "evidence");

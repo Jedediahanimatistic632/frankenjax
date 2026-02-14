@@ -1,0 +1,11 @@
+{
+  "schema_version": "frankenjax.parity-gate.v1",
+  "packet_id": "FJ-P2C-004",
+  "generated_at_unix_ms": 1739520000000,
+  "strict_mode": {
+    "status": "pass",
+    "checked_cases": 8,
+    "mismatches": 0,
+    "report_path": "artifacts/evidence/FJ-P2C-004/parity_strict.json"
+  }
+}

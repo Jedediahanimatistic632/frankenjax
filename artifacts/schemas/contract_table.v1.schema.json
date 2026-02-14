@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frankenjax.dev/schemas/contract_table.v1.schema.json",
+  "title": "FrankenJAX Contract Table v1",
+  "description": "Machine-checkable strict and hardened runtime contract rows.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "packet_id",
+    "generated_at_unix_ms",
+    "mode_matrix",
+    "unknown_feature_policy",
+    "invariants"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "frankenjax.contract-table.v1"
+    },
+    "packet_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at_unix_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "mode_matrix": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mode",
+          "contract_rows"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "strict",
+              "hardened"
+            ]
+          },
+          "contract_rows": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "row_id",
+                "title",
+                "preconditions",
+                "guarantees",
+                "failure_behavior",
+                "observability",
+                "compatibility_tier"
+              ],
+              "properties": {
+                "row_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "preconditions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "guarantees": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "failure_behavior": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "policy",
+                    "reason_code"
+                  ],
+                  "properties": {
+                    "policy": {
+                      "type": "string",
+                      "enum": [
+                        "fail_closed",
+                        "allowlisted_repair",
+                        "warn_and_continue"
+                      ]
+                    },
+                    "reason_code": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "observability": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "log_fields"
+                  ],
+                  "properties": {
+                    "log_fields": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                },
+                "compatibility_tier": {
+                  "type": "string",
+                  "enum": [
+                    "jax-observable",
+                    "internal-only"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "unknown_feature_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strict",
+        "hardened"
+      ],
+      "properties": {
+        "strict": {
+          "type": "string",
+          "enum": [
+            "fail_closed"
+          ]
+        },
+        "hardened": {
+          "type": "string",
+          "enum": [
+            "allowlisted_repair",
+            "fail_closed"
+          ]
+        }
+      }
+    },
+    "invariants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "invariant_id",
+          "statement",
+          "proof_artifact_refs"
+        ],
+        "properties": {
+          "invariant_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "proof_artifact_refs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

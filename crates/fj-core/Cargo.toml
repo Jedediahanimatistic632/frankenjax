@@ -8,4 +8,5 @@ serde = { version = "1.0.218", features = ["derive"] }
 smallvec = { workspace = true }
 
 [dev-dependencies]
+fj-test-utils = { path = "../fj-test-utils" }
 proptest = { workspace = true }

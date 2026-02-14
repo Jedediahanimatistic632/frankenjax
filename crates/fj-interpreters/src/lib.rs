@@ -138,13 +138,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_interpreters_test_log_schema_contract() {
+        let fixture_id =
+            fj_test_utils::fixture_id_from_json(&("interp", "add2")).expect("fixture digest");
+        let log = fj_test_utils::TestLogV1::unit(
+            fj_test_utils::test_id(module_path!(), "test_interpreters_test_log_schema_contract"),
+            fixture_id,
+            fj_test_utils::TestMode::Strict,
+            fj_test_utils::TestResult::Pass,
+        );
+        assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+    }
+
     mod proptest_tests {
         use super::*;
         use proptest::prelude::*;
 
         proptest! {
+            #![proptest_config(proptest::test_runner::Config::with_cases(
+                fj_test_utils::property_test_case_count()
+            ))]
             #[test]
-            fn add_commutative(a in -1_000_000i64..1_000_000, b in -1_000_000i64..1_000_000) {
+            fn prop_interpreters_add_commutative(
+                a in -1_000_000i64..1_000_000,
+                b in -1_000_000i64..1_000_000
+            ) {
+                let _seed = fj_test_utils::capture_proptest_seed();
                 let jaxpr = build_program(ProgramSpec::Add2);
                 let out_ab = eval_jaxpr(&jaxpr, &[Value::scalar_i64(a), Value::scalar_i64(b)])
                     .expect("add should succeed");
@@ -154,14 +174,14 @@ mod tests {
             }
 
             #[test]
-            fn add_identity(a in -1_000_000i64..1_000_000) {
+            fn prop_interpreters_add_one_total(a in -1_000_000i64..1_000_000) {
                 let jaxpr = build_program(ProgramSpec::AddOne);
                 let result = eval_jaxpr(&jaxpr, &[Value::scalar_i64(a)]);
                 prop_assert!(result.is_ok());
             }
 
             #[test]
-            fn reduce_sum_identity_scalar(x in prop::num::f64::NORMAL) {
+            fn prop_interpreters_reduce_sum_scalar_identity(x in prop::num::f64::NORMAL) {
                 use fj_core::{Atom, Equation, Jaxpr, Primitive, VarId};
                 use smallvec::smallvec;
                 use std::collections::BTreeMap;

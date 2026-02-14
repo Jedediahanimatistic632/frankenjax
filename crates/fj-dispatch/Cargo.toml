@@ -12,6 +12,7 @@ fj-ledger = { path = "../fj-ledger" }
 
 [dev-dependencies]
 criterion = "0.5.1"
+fj-test-utils = { path = "../fj-test-utils" }
 
 [[bench]]
 name = "dispatch_baseline"

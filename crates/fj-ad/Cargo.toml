@@ -10,4 +10,5 @@ smallvec = { workspace = true }
 
 [dev-dependencies]
 fj-interpreters = { path = "../fj-interpreters" }
+fj-test-utils = { path = "../fj-test-utils" }
 proptest = { workspace = true }

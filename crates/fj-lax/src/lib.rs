@@ -412,4 +412,17 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn test_lax_test_log_schema_contract() {
+        let fixture_id =
+            fj_test_utils::fixture_id_from_json(&("lax", "add")).expect("fixture digest");
+        let log = fj_test_utils::TestLogV1::unit(
+            fj_test_utils::test_id(module_path!(), "test_lax_test_log_schema_contract"),
+            fixture_id,
+            fj_test_utils::TestMode::Strict,
+            fj_test_utils::TestResult::Pass,
+        );
+        assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+    }
 }

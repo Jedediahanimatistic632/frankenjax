@@ -1,14 +1,14 @@
 {
   "schema_version": "frankenjax.reliability-gate-report.v1",
-  "generated_at_unix_ms": 1771095983242,
+  "generated_at_unix_ms": 1771096204759,
   "budgets_path": "/data/projects/frankenjax/artifacts/ci/reliability_budgets.v1.json",
   "coverage": {
-    "enabled": false,
-    "passed": true,
+    "enabled": true,
+    "passed": false,
     "report": "/data/projects/frankenjax/artifacts/ci/coverage_report.v1.json"
   },
   "flake": {
-    "enabled": true,
+    "enabled": false,
     "passed": true,
     "report": "/data/projects/frankenjax/artifacts/ci/flake_report.v1.json"
   },
@@ -16,8 +16,8 @@
     "enabled": false,
     "passed": true,
     "report": "/data/projects/frankenjax/artifacts/ci/runtime_report.v1.json",
-    "full_pipeline_duration_seconds": 19,
+    "full_pipeline_duration_seconds": 9,
     "full_pipeline_budget_seconds": 600
   },
-  "overall_passed": true
+  "overall_passed": false
 }

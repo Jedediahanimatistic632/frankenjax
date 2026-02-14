@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUDGETS_JSON="$ROOT_DIR/artifacts/ci/reliability_budgets.v1.json"
 COVERAGE_RAW_JSON="$ROOT_DIR/artifacts/ci/coverage_raw_llvmcov.v1.json"
 COVERAGE_REPORT_JSON="$ROOT_DIR/artifacts/ci/coverage_report.v1.json"
+COVERAGE_TREND_JSON="$ROOT_DIR/artifacts/ci/coverage_trend.v1.json"
 FLAKE_REPORT_JSON="$ROOT_DIR/artifacts/ci/flake_report.v1.json"
 RUNTIME_REPORT_JSON="$ROOT_DIR/artifacts/ci/runtime_report.v1.json"
 GATE_REPORT_JSON="$ROOT_DIR/artifacts/ci/reliability_gate_report.v1.json"
@@ -160,6 +161,56 @@ if [[ $SKIP_COVERAGE -eq 0 ]]; then
       crates: .
     }' \
     "$coverage_entries_tmp" >"$COVERAGE_REPORT_JSON"
+
+  if [[ -f "$COVERAGE_TREND_JSON" ]]; then
+    for crate in "${crates[@]}"; do
+      prev_line_percent="$(
+        jq -r \
+          --arg crate "$crate" \
+          '.snapshots[-1].crates[]? | select(.crate == $crate) | .line_percent // empty' \
+          "$COVERAGE_TREND_JSON"
+      )"
+      if [[ -z "$prev_line_percent" ]]; then
+        continue
+      fi
+
+      curr_line_percent="$(
+        jq -r \
+          --arg crate "$crate" \
+          '.crates[] | select(.crate == $crate) | .line_percent' \
+          "$COVERAGE_REPORT_JSON"
+      )"
+
+      regressed="$(
+        awk -v prev="$prev_line_percent" -v curr="$curr_line_percent" \
+          'BEGIN { print ((prev - curr) > 2.0) ? "true" : "false" }'
+      )"
+      if [[ "$regressed" == "true" ]]; then
+        coverage_pass=false
+        echo "[coverage] regression >2% for $crate: prev=$prev_line_percent current=$curr_line_percent" >&2
+      fi
+    done
+  fi
+
+  snapshot_tmp="$(mktemp)"
+  trend_tmp="$(mktemp)"
+  jq -n \
+    --argjson ts_unix_ms "$(date +%s%3N)" \
+    --slurpfile report "$COVERAGE_REPORT_JSON" \
+    '{
+      ts_unix_ms: $ts_unix_ms,
+      crates: $report[0].crates
+    }' >"$snapshot_tmp"
+
+  if [[ -f "$COVERAGE_TREND_JSON" ]]; then
+    jq --slurpfile snap "$snapshot_tmp" '.snapshots += $snap' "$COVERAGE_TREND_JSON" >"$trend_tmp"
+  else
+    jq --slurpfile snap "$snapshot_tmp" \
+      '{schema_version: "frankenjax.coverage-trend.v1", snapshots: $snap}' >"$trend_tmp"
+  fi
+
+  mv "$trend_tmp" "$COVERAGE_TREND_JSON"
+  rm -f "$snapshot_tmp"
 
   if [[ "$coverage_pass" != "true" ]]; then
     echo "[coverage] failed floors for crate(s): $(paste -sd, "$coverage_failures_tmp")" >&2

@@ -1,0 +1,25 @@
+name: reliability-gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * 0'
+
+jobs:
+  reliability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Run Reliability Gates
+        run: ./scripts/enforce_quality_gates.sh
+      - name: Upload Reliability Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-artifacts
+          path: artifacts/ci/

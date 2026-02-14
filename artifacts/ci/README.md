@@ -5,6 +5,9 @@ This directory stores machine-readable outputs for reliability gates.
 ## Budget Source
 
 - `reliability_budgets.v1.json` — normative line/branch coverage floors, flake budgets, and runtime budgets.
+- `coverage_trend.v1.json` — append-only coverage trend snapshots used for regression checks.
+- `flake_quarantine_policy.md` — quarantine and re-promotion procedure.
+- `github_actions_reliability_gates.example.yml` — CI wiring template.
 
 ## Generated Reports
 

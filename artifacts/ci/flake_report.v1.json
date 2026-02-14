@@ -1,6 +1,6 @@
 {
   "schema_version": "frankenjax.flake-report.v1",
-  "generated_at_unix_ms": 1771095983216,
+  "generated_at_unix_ms": 1771096188244,
   "command": "cargo test --workspace --quiet",
   "runs_requested": 1,
   "pass_runs": 1,

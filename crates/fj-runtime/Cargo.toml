@@ -11,7 +11,7 @@ frankentui-integration = ["dep:ftui"]
 [dependencies]
 fj-core = { path = "../fj-core" }
 fj-ledger = { path = "../fj-ledger" }
-asupersync = { version = "0.1.1", path = "/dp/asupersync", default-features = false, optional = true }
+asupersync = { version = "0.2.0", path = "/dp/asupersync", default-features = false, optional = true }
 ftui = { version = "0.1.1", path = "/dp/frankentui/crates/ftui", default-features = false, optional = true }
 
 [dev-dependencies]

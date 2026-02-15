@@ -1,0 +1,280 @@
+{
+  "schema_version": "frankenjax.legacy-anchor-map.v1",
+  "packet_id": "FJ-P2C-003",
+  "generated_at_unix_ms": 1771114500000,
+  "generated_by": "SageKite",
+  "legacy_oracle_root": "/data/projects/frankenjax/legacy_jax_code/jax",
+  "anchors": [
+    {
+      "anchor_id": "p2c003.pe.partial_val",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "PartialVal",
+      "behavior_summary": "Sum type classifying each value as either known (concrete constant) or unknown (abstract value). Represented as (None, const) for known or (AbstractValue, None) for unknown, with XOR invariant enforced.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 68,
+        "end": 110
+      },
+      "confidence": "high",
+      "notes": "Core data structure for partial evaluation. FrankenJAX needs an enum PartialVal { Known(Value), Unknown(AbstractValue) } in fj-interpreters."
+    },
+    {
+      "anchor_id": "p2c003.pe.jaxpr_trace",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "JaxprTrace",
+      "behavior_summary": "Trace implementation for partial evaluation that intercepts primitive applications and classifies them as known-foldable or unknown-residual based on input PartialVal status.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 116,
+        "end": 420
+      },
+      "confidence": "high",
+      "notes": "Handles process_primitive (fold known, emit recipe for unknown), process_call (recursive PE of sub-functions), and instantiate_const (force unknown). Key methods: new_arg, new_const, instantiate_const, default_process_primitive."
+    },
+    {
+      "anchor_id": "p2c003.pe.jaxpr_tracer",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "JaxprTracer",
+      "behavior_summary": "Tracer carrying a PartialVal and a recipe (JaxprEqnRecipe, LambdaBinding, ConstVar, FreeVar, or Literal) that records how this value was produced for later Jaxpr reconstruction.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 479,
+        "end": 522
+      },
+      "confidence": "high",
+      "notes": "Slots: pval (PartialVal), recipe (JaxprTracerRecipe). is_known() delegates to pval. parents() returns recipe.in_tracers for equation recipes. full_lower() returns concrete value if known."
+    },
+    {
+      "anchor_id": "p2c003.pe.trace_to_jaxpr_nounits",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "trace_to_jaxpr_nounits",
+      "behavior_summary": "Top-level entry point for partial-evaluation-based tracing. Creates JaxprTrace, runs function under trace with PartialVal inputs, and calls tracers_to_jaxpr to reconstruct the residual Jaxpr.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 525,
+        "end": 538
+      },
+      "confidence": "high",
+      "notes": "Returns (Jaxpr, out_pvals, consts). Wrapped by ensure_no_leaks for tracer safety. Delegates to _trace_to_subjaxpr_nounits which splits inputs into known consts and unknown tracers."
+    },
+    {
+      "anchor_id": "p2c003.pe._trace_to_subjaxpr_nounits",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "_trace_to_subjaxpr_nounits",
+      "behavior_summary": "Core partial eval loop: splits inputs by known/unknown, creates tracers for unknowns, runs function, optionally instantiates const outputs, and calls tracers_to_jaxpr to build the residual graph.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 573,
+        "end": 596
+      },
+      "confidence": "high",
+      "notes": "Key flow: in_knowns partition -> merge_lists(in_tracers, in_consts) -> f(*in_args) -> to_jaxpr_tracer -> instantiate_const if needed -> tracers_to_jaxpr. This is the function FrankenJAX must reimplement."
+    },
+    {
+      "anchor_id": "p2c003.pe.tracers_to_jaxpr",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "tracers_to_jaxpr",
+      "behavior_summary": "Reconstructs a Jaxpr from tracer graph by topological sort of tracer recipes, mapping tracers to Vars and recipes to equations, collecting constants and environment values.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 716,
+        "end": 804
+      },
+      "confidence": "high",
+      "notes": "Handles recipe types: JaxprEqnRecipe -> equation, LambdaBinding -> input var, ConstVar -> constvar, FreeVar -> env var, Literal -> inline. Uses toposort for correct equation ordering. Deduplicates constants by identity."
+    },
+    {
+      "anchor_id": "p2c003.pe.partial_eval_jaxpr_nounits",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "partial_eval_jaxpr_nounits",
+      "behavior_summary": "Unzips a closed Jaxpr into known and unknown sub-Jaxprs by data dependence. Known jaxpr evaluates all equations with only known inputs; unknown jaxpr receives residuals as extra inputs and produces unknown outputs.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 858,
+        "end": 919
+      },
+      "confidence": "high",
+      "notes": "Central to JIT compilation. Returns (jaxpr_known, jaxpr_unknown, out_unknowns, residual_avals). The known jaxpr's extra outputs are residuals that become the unknown jaxpr's leading inputs. Cached via weakref_lru_cache."
+    },
+    {
+      "anchor_id": "p2c003.pe.dynamic_jaxpr_tracer",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "DynamicJaxprTracer",
+      "behavior_summary": "Modern tracer for dynamic Jaxpr construction, carrying an abstract value (aval), a Var or Literal atom (val), and a parent TracingEqn reference for provenance tracking.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1629,
+        "end": 1724
+      },
+      "confidence": "high",
+      "notes": "Slots: aval, val (Atom), mutable_qdd, parent. full_lower() returns concrete value for Literals or constvar-backed values. get_const() retrieves the constant if this tracer represents one."
+    },
+    {
+      "anchor_id": "p2c003.pe.jaxpr_stack_frame",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "JaxprStackFrame",
+      "behavior_summary": "Mutable accumulator for dynamic Jaxpr construction: holds gensym counter, constant mappings (constid_to_tracer, constvar_to_val), equation list, input vars, and effects. Converts to final Jaxpr via to_jaxpr().",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1778,
+        "end": 1877
+      },
+      "confidence": "high",
+      "notes": "to_jaxpr() collects equations, drops unused constvars, computes effects, and returns (Jaxpr, constvals). Uses WeakValueDictionary for constid_to_tracer to allow GC-based DCE when auto_dce=True."
+    },
+    {
+      "anchor_id": "p2c003.pe.dynamic_jaxpr_trace",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "DynamicJaxprTrace",
+      "behavior_summary": "Modern trace implementation that builds Jaxpr dynamically by emitting equations for each primitive application. Handles constant folding (eager_constant_folding config), custom staging rules, and call/map primitives.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1941,
+        "end": 2296
+      },
+      "confidence": "high",
+      "notes": "Key methods: new_arg (allocates input var), new_const (deduplicates by id, creates Literal for literalable values), emit_eqn (records equation in frame), process_primitive (dispatches to custom_staging_rules or default), process_call (recursively traces sub-functions)."
+    },
+    {
+      "anchor_id": "p2c003.pe.trace_to_jaxpr_dynamic",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "trace_to_jaxpr_dynamic",
+      "behavior_summary": "Entry point for dynamic tracing: creates DynamicJaxprTrace, traces function with abstract input types, and builds Jaxpr via frame.to_jaxpr(). Enforces leak checks and validates returned types.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 2465,
+        "end": 2495
+      },
+      "confidence": "high",
+      "notes": "Returns (Jaxpr, out_avals, consts). Supports keep_inputs for dropping unused inputs, lower flag for lo-jaxpr mode, auto_dce for GC-based dead code elimination. Used by jit staging pipeline."
+    },
+    {
+      "anchor_id": "p2c003.pe.trace_to_jaxpr",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "trace_to_jaxpr",
+      "behavior_summary": "Newer entry point for dynamic tracing using FlatTree-based input/output representations. Creates DynamicJaxprTrace, traces function, and returns ClosedJaxpr with output avals.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 2426,
+        "end": 2461
+      },
+      "confidence": "high",
+      "notes": "Preferred over trace_to_jaxpr_dynamic. Handles pytree flattening/unflattening. Validates returned types via _check_returned_jaxtypes and _check_no_returned_refs."
+    },
+    {
+      "anchor_id": "p2c003.pe.dce_jaxpr",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "dce_jaxpr",
+      "behavior_summary": "Dead code elimination pass on Jaxpr: backward-walks equations, marks variables as used/unused based on output usage, and removes unused equations while preserving effectful operations.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1411,
+        "end": 1515
+      },
+      "confidence": "high",
+      "notes": "Returns (new_jaxpr, used_inputs). Respects dceable_effects set (ReadEffect, NamedAxisEffect, InternalMutableArrayEffect can be DCE'd). Per-primitive DCE rules via dce_rules dict."
+    },
+    {
+      "anchor_id": "p2c003.pe.convert_constvars_jaxpr",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "convert_constvars_jaxpr",
+      "behavior_summary": "Lifts constvars to invars (prepends to input list), enabling a closed Jaxpr to accept its constants as explicit arguments. Inverse of convert_invars_to_constvars.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 817,
+        "end": 828
+      },
+      "confidence": "high",
+      "notes": "Essential for constant hoisting in partial evaluation. Used by dce_jaxpr_consts and jit staging. Simple structural transformation on Jaxpr fields."
+    },
+    {
+      "anchor_id": "p2c003.pe.convert_invars_to_constvars",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "convert_invars_to_constvars",
+      "behavior_summary": "Moves the first n invars to constvars, converting explicit arguments back to closed-over constants. Inverse of convert_constvars_jaxpr.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 831,
+        "end": 845
+      },
+      "confidence": "high",
+      "notes": "Cached via weakref_lru_cache. Used by make_jaxpr to restore constant bindings after jit tracing. Updates debug_info.arg_names accordingly."
+    },
+    {
+      "anchor_id": "p2c003.stages.traced",
+      "legacy_path": "jax/jax/_src/stages.py",
+      "legacy_symbol": "Traced",
+      "behavior_summary": "Represents a traced (but not yet lowered) computation. Carries the jaxpr, parameters, pytree structure, and constants. Can be called directly or lowered to MLIR.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 403,
+        "end": 497
+      },
+      "confidence": "high",
+      "notes": "Staging pipeline: jit(f).trace(*args) -> Traced -> .lower() -> Lowered -> .compile() -> Compiled -> .__call__(). The .lojax property handles hi-jaxpr to lo-jaxpr conversion via pe.lower_jaxpr."
+    },
+    {
+      "anchor_id": "p2c003.stages.lowered",
+      "legacy_path": "jax/jax/_src/stages.py",
+      "legacy_symbol": "Lowered",
+      "behavior_summary": "Represents a lowered computation (MLIR/StableHLO). Carries the Lowering object, argument info, output tree, and type metadata. Can be compiled or inspected.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 536,
+        "end": 665
+      },
+      "confidence": "high",
+      "notes": "Lowered.compile() produces a Compiled object. Lowered.as_text() returns StableHLO string representation. FrankenJAX equivalent: a LoweredProgram struct holding the IR and compilation metadata."
+    },
+    {
+      "anchor_id": "p2c003.stages.compiled",
+      "legacy_path": "jax/jax/_src/stages.py",
+      "legacy_symbol": "Compiled",
+      "behavior_summary": "Represents a compiled, executable computation. Wraps XLA LoadedExecutable with input/output sharding, layout, and memory kind metadata. Callable with concrete arrays.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 667,
+        "end": 900
+      },
+      "confidence": "high",
+      "notes": "Terminal stage of the pipeline. call() dispatches to executable.call() with flattened args. FrankenJAX equivalent would be a CompiledProgram with a dispatch entry point."
+    },
+    {
+      "anchor_id": "p2c003.api.make_jaxpr",
+      "legacy_path": "jax/jax/_src/api.py",
+      "legacy_symbol": "make_jaxpr",
+      "behavior_summary": "User-facing API that returns the Jaxpr of a function given example arguments. Internally calls jit(fun).trace(*args) and then converts invars back to constvars via convert_invars_to_constvars.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 2471,
+        "end": 2553
+      },
+      "confidence": "high",
+      "notes": "Returns ClosedJaxpr (or (ClosedJaxpr, shape_info) if return_shape=True). Uses jit's tracing machinery internally. Supports static_argnums and axis_env. FrankenJAX already has build_program() which serves a similar role for preset programs."
+    },
+    {
+      "anchor_id": "p2c003.pe.eqn_recipe",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "JaxprEqnRecipe",
+      "behavior_summary": "NamedTuple recording a primitive application during tracing: stores eqn_id, primitive, out_avals, in_tracers, out_tracer_refs, params, effects, and source_info for later Jaxpr reconstruction.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 666,
+        "end": 715
+      },
+      "confidence": "high",
+      "notes": "Created by new_eqn_recipe when JaxprTrace.process_primitive encounters an unknown-input application. out_tracer_refs are weak references allowing GC-based DCE."
+    }
+  ],
+  "extraction_invariants": [
+    "PartialVal must maintain XOR invariant: exactly one of (aval, const) is None at all times.",
+    "Partial evaluation must be idempotent: PE of a fully-known jaxpr produces the same computation as direct evaluation.",
+    "Residual variables from jaxpr_known must exactly match the leading inputs of jaxpr_unknown in count and type.",
+    "Dead code elimination must preserve effectful equations regardless of output usage.",
+    "Constant hoisting (convert_constvars_jaxpr / convert_invars_to_constvars) must be exact inverses when composed.",
+    "Tracer leak detection must fire before any residual Jaxpr is returned from tracing.",
+    "The staging pipeline (trace -> lower -> compile -> execute) must be associative: each stage's output is a valid input to the next.",
+    "Dynamic tracing must deduplicate constants by identity (id()) to avoid redundant constvar entries.",
+    "Topological sort of tracer recipes must produce a valid equation ordering where all inputs are defined before use."
+  ]
+}

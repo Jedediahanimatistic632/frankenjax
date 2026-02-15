@@ -605,6 +605,8 @@ dependencies = [
  "fj-test-utils",
  "proptest",
  "rustc-hash",
+ "serde",
+ "serde_json",
  "smallvec",
 ]
 

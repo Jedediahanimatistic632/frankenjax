@@ -1,13 +1,13 @@
 {
   "schema_version": "frankenjax.crash-report.v1",
-  "generated_at_unix_ms": 1771102304827,
+  "generated_at_unix_ms": 1771122025707,
   "index_path": "/data/projects/frankenjax/crates/fj-conformance/fuzz/corpus/crashes/index.v1.jsonl",
   "index_exists": true,
-  "max_open_p0": 0,
+  "max_open_p0": -1,
   "open_p0_count": 0,
   "fail_on_new_p0": true,
   "known_p0_hashes": [],
   "new_open_p0_hashes": [],
   "open_p0_records": [],
-  "passed": true
+  "passed": false
 }

@@ -25,8 +25,11 @@ pub struct StagedProgram {
     /// Which original outputs are produced by the unknown jaxpr.
     pub out_unknowns: Vec<bool>,
 
-    /// Pre-computed residual values (outputs of evaluating jaxpr_known).
-    pub residuals: Option<Vec<Value>>,
+    /// Original outputs that are already known after staging.
+    pub known_outputs: Vec<Value>,
+
+    /// Pre-computed residual values consumed by the unknown sub-jaxpr.
+    pub residuals: Vec<Value>,
 }
 
 /// Errors during staging.
@@ -38,6 +41,18 @@ pub enum StagingError {
     KnownEval(InterpreterError),
     /// Unknown-jaxpr evaluation failed.
     UnknownEval(InterpreterError),
+    /// Partitioning known outputs from residual outputs failed.
+    OutputPartition {
+        expected_known: usize,
+        actual_outputs: usize,
+    },
+    /// Reconstructing final outputs from known/unknown streams failed.
+    OutputReconstruction {
+        expected_known: usize,
+        actual_known: usize,
+        expected_unknown: usize,
+        actual_unknown: usize,
+    },
 }
 
 impl std::fmt::Display for StagingError {
@@ -46,6 +61,24 @@ impl std::fmt::Display for StagingError {
             Self::PartialEval(e) => write!(f, "staging: partial eval failed: {e}"),
             Self::KnownEval(e) => write!(f, "staging: known eval failed: {e}"),
             Self::UnknownEval(e) => write!(f, "staging: unknown eval failed: {e}"),
+            Self::OutputPartition {
+                expected_known,
+                actual_outputs,
+            } => write!(
+                f,
+                "staging: output partition mismatch (expected at least {} known outputs, got {})",
+                expected_known, actual_outputs
+            ),
+            Self::OutputReconstruction {
+                expected_known,
+                actual_known,
+                expected_unknown,
+                actual_unknown,
+            } => write!(
+                f,
+                "staging: output reconstruction mismatch (known expected {}, got {}; unknown expected {}, got {})",
+                expected_known, actual_known, expected_unknown, actual_unknown
+            ),
         }
     }
 }
@@ -78,17 +111,31 @@ pub fn stage_jaxpr(
     let pe_result: PartialEvalResult =
         partial_eval_jaxpr(jaxpr, unknowns).map_err(StagingError::PartialEval)?;
 
-    // Evaluate the known sub-Jaxpr with the known inputs to produce residuals.
-    let residuals = if !pe_result.jaxpr_known.equations.is_empty() {
-        let known_outputs = eval_jaxpr_with_consts(
+    // Evaluate known sub-jaxpr and split known outputs vs residuals.
+    let known_output_count = pe_result
+        .out_unknowns
+        .iter()
+        .filter(|is_unknown| !**is_unknown)
+        .count();
+
+    let (known_outputs, residuals) = if !pe_result.jaxpr_known.outvars.is_empty() {
+        let known_eval_outputs = eval_jaxpr_with_consts(
             &pe_result.jaxpr_known,
             &pe_result.known_consts,
             known_values,
         )
         .map_err(StagingError::KnownEval)?;
-        Some(known_outputs)
+        if known_eval_outputs.len() < known_output_count {
+            return Err(StagingError::OutputPartition {
+                expected_known: known_output_count,
+                actual_outputs: known_eval_outputs.len(),
+            });
+        }
+
+        let (known_slice, residual_slice) = known_eval_outputs.split_at(known_output_count);
+        (known_slice.to_vec(), residual_slice.to_vec())
     } else {
-        None
+        (Vec::new(), Vec::new())
     };
 
     Ok(StagedProgram {
@@ -96,6 +143,7 @@ pub fn stage_jaxpr(
         known_consts: pe_result.known_consts,
         jaxpr_unknown: pe_result.jaxpr_unknown,
         out_unknowns: pe_result.out_unknowns,
+        known_outputs,
         residuals,
     })
 }
@@ -109,24 +157,41 @@ pub fn execute_staged(
     staged: &StagedProgram,
     dynamic_args: &[Value],
 ) -> Result<Vec<Value>, StagingError> {
-    if staged.jaxpr_unknown.equations.is_empty() {
-        // All outputs were known — return residuals directly.
-        return staged.residuals.clone().ok_or(StagingError::KnownEval(
-            InterpreterError::InputArity {
-                expected: 0,
-                actual: 0,
-            },
-        ));
+    let expected_unknown = staged.out_unknowns.iter().filter(|u| **u).count();
+    let expected_known = staged.out_unknowns.len().saturating_sub(expected_unknown);
+
+    let unknown_outputs = if staged.jaxpr_unknown.outvars.is_empty() {
+        Vec::new()
+    } else {
+        // Build inputs for the unknown jaxpr: residuals ++ dynamic_args.
+        let mut unknown_inputs: Vec<Value> = staged.residuals.clone();
+        unknown_inputs.extend(dynamic_args.iter().cloned());
+        eval_jaxpr(&staged.jaxpr_unknown, &unknown_inputs).map_err(StagingError::UnknownEval)?
+    };
+
+    if staged.known_outputs.len() != expected_known || unknown_outputs.len() != expected_unknown {
+        return Err(StagingError::OutputReconstruction {
+            expected_known,
+            actual_known: staged.known_outputs.len(),
+            expected_unknown,
+            actual_unknown: unknown_outputs.len(),
+        });
     }
 
-    // Build inputs for the unknown jaxpr: residuals ++ dynamic_args.
-    let mut unknown_inputs: Vec<Value> = Vec::new();
-    if let Some(ref residuals) = staged.residuals {
-        unknown_inputs.extend(residuals.iter().cloned());
+    let mut combined: Vec<Value> = Vec::with_capacity(staged.out_unknowns.len());
+    let mut known_iter = staged.known_outputs.iter();
+    let mut unknown_iter = unknown_outputs.iter();
+    for is_unknown in &staged.out_unknowns {
+        if *is_unknown {
+            if let Some(v) = unknown_iter.next() {
+                combined.push(v.clone());
+            }
+        } else if let Some(v) = known_iter.next() {
+            combined.push(v.clone());
+        }
     }
-    unknown_inputs.extend(dynamic_args.iter().cloned());
 
-    eval_jaxpr(&staged.jaxpr_unknown, &unknown_inputs).map_err(StagingError::UnknownEval)
+    Ok(combined)
 }
 
 #[cfg(test)]
@@ -289,6 +354,29 @@ mod tests {
         )
     }
 
+    /// { a, b -> c = neg(a); d = mul(c, b) -> a, d }
+    fn make_mixed_outputs_jaxpr() -> Jaxpr {
+        Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(1), VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        )
+    }
+
     // ── make_jaxpr tests ────────────────────────────────────────────
 
     #[test]
@@ -342,9 +430,9 @@ mod tests {
     // ── stage_jaxpr tests ───────────────────────────────────────────
 
     #[test]
-    fn test_staging_all_known_produces_residuals() {
+    fn test_staging_all_known_captures_known_outputs() {
         run_logged_test(
-            "test_staging_all_known_produces_residuals",
+            "test_staging_all_known_captures_known_outputs",
             &("staging", "all_known"),
             fj_test_utils::TestMode::Strict,
             || {
@@ -357,7 +445,8 @@ mod tests {
                 .unwrap();
 
                 assert!(staged.jaxpr_unknown.equations.is_empty());
-                assert!(staged.residuals.is_some());
+                assert_eq!(staged.known_outputs, vec![Value::scalar_i64(7)]);
+                assert!(staged.residuals.is_empty());
                 Ok(vec![])
             },
         );
@@ -374,7 +463,8 @@ mod tests {
                 let staged = stage_jaxpr(&jaxpr, &[true, true], &[]).unwrap();
 
                 assert!(!staged.jaxpr_unknown.equations.is_empty());
-                assert!(staged.residuals.is_none());
+                assert!(staged.residuals.is_empty());
+                assert!(staged.known_outputs.is_empty());
                 Ok(vec![])
             },
         );
@@ -391,7 +481,8 @@ mod tests {
                 let staged = stage_jaxpr(&jaxpr, &[false, true], &[Value::scalar_i64(5)]).unwrap();
                 assert_eq!(staged.jaxpr_known.equations.len(), 1);
                 assert_eq!(staged.jaxpr_unknown.equations.len(), 1);
-                assert!(staged.residuals.is_some());
+                assert!(staged.known_outputs.is_empty());
+                assert!(!staged.residuals.is_empty());
                 Ok(vec![])
             },
         );
@@ -468,6 +559,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_staging_execute_reconstructs_mixed_known_and_unknown_outputs() {
+        run_logged_test(
+            "test_staging_execute_reconstructs_mixed_known_and_unknown_outputs",
+            &("staging", "execute", "mixed_known_unknown_outputs"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = make_mixed_outputs_jaxpr();
+                let staged = stage_jaxpr(&jaxpr, &[false, true], &[Value::scalar_i64(5)]).unwrap();
+                assert_eq!(staged.known_outputs, vec![Value::scalar_i64(5)]);
+                assert_eq!(staged.residuals.len(), 1);
+
+                let result = execute_staged(&staged, &[Value::scalar_i64(3)]).unwrap();
+                let full =
+                    eval_jaxpr(&jaxpr, &[Value::scalar_i64(5), Value::scalar_i64(3)]).unwrap();
+                assert_eq!(result, full);
+                Ok(vec![])
+            },
+        );
+    }
+
     // ── StagingError tests ──────────────────────────────────────────
 
     #[test]
@@ -499,6 +611,22 @@ mod tests {
                 });
                 let msg3 = format!("{e3}");
                 assert!(msg3.contains("unknown eval"));
+
+                let e4 = StagingError::OutputPartition {
+                    expected_known: 2,
+                    actual_outputs: 1,
+                };
+                let msg4 = format!("{e4}");
+                assert!(msg4.contains("partition"));
+
+                let e5 = StagingError::OutputReconstruction {
+                    expected_known: 1,
+                    actual_known: 0,
+                    expected_unknown: 1,
+                    actual_unknown: 2,
+                };
+                let msg5 = format!("{e5}");
+                assert!(msg5.contains("reconstruction"));
 
                 let _: &dyn std::error::Error = &e1;
                 Ok(vec![])

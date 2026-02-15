@@ -173,7 +173,7 @@ Cycle check:
 
 | Target architecture component | Current owner/location | Status | Conflict impact |
 |---|---|---|---|
-| `trace` crate (`fj-trace`) | folded into `fj-core` and `fj-interpreters` | missing dedicated crate | trace/lowering boundary not explicit |
+| `trace` crate (`fj-trace`) | dedicated crate (`crates/fj-trace`) owns tracer IDs, abstract values, and trace context materialization | satisfied (crate present) | remaining conflict is explicit lowering/backend split, not trace crate existence |
 | `canonical IR` crate (`fj-ir`) | represented in `fj-core` | partially satisfied | IR ownership exists but not isolated as planned crate |
 | `transform stack` crate (`fj-transforms`) | folded into `fj-dispatch` + `fj-core` proof logic | missing dedicated crate | transform policy spread across crates |
 | `lowering` crate (`fj-lowering`) | folded into interpreter/dispatch path | missing | lowering contracts hard to isolate and benchmark separately |
@@ -183,13 +183,13 @@ Cycle check:
 Conflict-check verdict:
 - Current crate dependency graph is acyclic and layered.
 - Architecture conflicts are primarily missing crate boundary extractions, not dependency cycles.
-- Highest-priority boundary work remains trace/transform/lowering decomposition and backend facade isolation.
+- `fj-trace` boundary exists as a dedicated crate; highest-priority extraction work remains transform/lowering decomposition and backend/API facade isolation.
 
 ## 11. Symbol/API Census and Surface Classification
 
 Census scope for V1 parity slice:
 - legacy anchors in section `2` (transform, trace, cache, dispatch, backend/ffi bands),
-- Rust workspace exported symbols in `fj-core`, `fj-lax`, `fj-interpreters`, `fj-ad`, `fj-cache`, `fj-dispatch`, `fj-ledger`, `fj-runtime`, `fj-conformance`, `fj-egraph`.
+- Rust workspace exported symbols in `fj-core`, `fj-trace`, `fj-lax`, `fj-interpreters`, `fj-ad`, `fj-cache`, `fj-dispatch`, `fj-ledger`, `fj-runtime`, `fj-conformance`, `fj-egraph`.
 
 ### 11.1 Surface Classes
 
@@ -217,12 +217,13 @@ Census scope for V1 parity slice:
 
 ### 11.3 Rust Workspace Symbol Census (Current Slice)
 
-`rg '^pub (struct|enum|fn|mod|type|trait)'` count snapshot (2026-02-14):
-- `fj-core=30`, `fj-conformance=43`, `fj-ledger=15`, `fj-test-utils=10`, `fj-cache=7`, `fj-dispatch=6`, `fj-egraph=5`, `fj-ad=3`, `fj-runtime=3`, `fj-interpreters=2`, `fj-lax=2`.
+`rg '^pub (struct|enum|fn|mod|type|trait)'` count snapshot (2026-02-15):
+- `fj-core=31`, `fj-trace=12`, `fj-interpreters=15`, `fj-dispatch=6`, `fj-lax=2`, `fj-cache=7`, `fj-runtime=3`, `fj-conformance=43`, `fj-ledger=15`, `fj-ad=3`, `fj-egraph=5`, `fj-test-utils=10`.
 
 | Family | Key symbols | Class | Boundary note | Regression tag |
 |---|---|---|---|---|
 | IR + transform proof | `Jaxpr`, `TraceTransformLedger`, `TransformCompositionProof`, `verify_transform_composition` (`fj-core`) | `S1` | public in crate, but stability governed by parity semantics | `P0-transform-proof` |
+| Trace abstraction and capture | `TracerId`, `AbstractValue`, `JaxprTrace`, `ClosedJaxpr`, `TraceError`, `SimpleTraceContext` (`fj-trace`) | `S1` | dedicated trace boundary now explicit in crate ownership | `P0-trace-shape` |
 | Primitive semantics | `eval_primitive`, `EvalError` (`fj-lax`) | `S1` | primitive semantics feed all execution paths | `P0-primitive-semantics` |
 | Interpreter execution | `eval_jaxpr`, `InterpreterError` (`fj-interpreters`) | `S1` | execution core for transform wrappers | `P0-ir-exec` |
 | AD execution | `grad_jaxpr`, `grad_first`, `AdError` (`fj-ad`) | `S1` | drives `grad` transform behavior | `P1-ad-numerics` |
@@ -547,3 +548,75 @@ Gap-matrix source: `artifacts/docs/bd-3dl.23.1_gap_matrix.v1.md`
 - Material expansion: structure coverage now spans topology, dependency direction, lifecycle ordering, error/recovery, and security/compatibility edge cases in one integrated draft.
 - Topology/ownership/dependency clarity: crate ownership and dependency direction are explicit and cycle-checked.
 - Source-anchored reviewability: every major structural claim is tied to concrete legacy or Rust anchor families above, with sectioned matrices suitable for independent review.
+
+## 18. Unit/E2E Test Corpus and Logging Evidence Crosswalk (DOC-PASS-09)
+
+### 18.1 Behavior -> Verification Asset Crosswalk
+
+| Major behavior family | Unit/property anchors | Differential/E2E anchors | Logging/forensics anchors |
+|---|---|---|---|
+| transform composition and order semantics | `fj-core` transform-composition tests; `fj-dispatch` transform-order tests | `crates/fj-conformance/tests/e2e.rs` (`e2e_p2c001_transform_order_enforcement`, `e2e_p2c001_transform_stack_composition`); `golden_journeys` transform-composition scenario | `frankenjax.e2e.log.v1` logs with `intermediate_states` + replay command |
+| strict vs hardened compatibility split | `fj-cache` strict unknown-feature rejection tests; `fj-dispatch` strict fail-closed cache-gate test | `crates/fj-conformance/tests/e2e.rs` (`e2e_p2c001_strict_vs_hardened_mode_split`) | E2E forensic log (`mode`, `details`, `artifact_refs`) + CI run manifest summaries |
+| IR well-formedness and determinism | `fj-core::Jaxpr::validate_well_formed` tests; canonical fingerprint determinism tests | `crates/fj-conformance/tests/ir_core_oracle.rs`; `e2e_p2c001_trace_to_ir_roundtrip`; `e2e_p2c001_ir_determinism_under_replay` | `frankenjax.test-log.v1` (`fixture_id`, `artifact_refs`, `phase_timings`) |
+| partial-eval/staging correctness | `fj-interpreters/src/partial_eval.rs` + `staging.rs` unit/property suites | `crates/fj-conformance/tests/pe_staging_oracle.rs`; `crates/fj-conformance/tests/e2e_p2c003.rs` full scenario set | `frankenjax.e2e.log.v1` traces for each P2C-003 scenario |
+| primitive semantics and interpreter execution | inline unit tests in `fj-lax`, `fj-interpreters`, `fj-ad` | `crates/fj-conformance/tests/transforms.rs` parity bundle run; `golden_journeys` basic/grad/vmap scenarios | `frankenjax.test-log.v1` across crate-local logged tests |
+| durability integrity and artifact acceptance | durability unit tests in `crates/fj-conformance/src/durability.rs`; schema validation in `artifact_schemas.rs` | CI/reliability flow via `scripts/enforce_quality_gates.sh` + failure forensics tests | `frankenjax.failure-diagnostic.v1`, `frankenjax.run-manifest.v1`, scrub/proof artifacts |
+| CI gate replayability and failure diagnostics | gate-specific tests in `crates/fj-conformance/tests/failure_forensics.rs` | runtime/e2e gate execution via `scripts/enforce_quality_gates.sh` and `scripts/run_e2e.sh` | failure diagnostic schema + one-command replay command checks |
+
+### 18.2 Replay/Forensics Logging Field Requirements
+
+| Log schema | Required replay/forensics fields | Primary producers |
+|---|---|---|
+| `frankenjax.test-log.v1` | `test_id`, `fixture_id`, `seed`, `mode`, `env`, `artifact_refs`, `result`, `duration_ms`, `details`, `phase_timings` | `fj-test-utils::TestLogV1`; logged test harnesses in `fj-core`, `fj-trace`, `fj-interpreters` |
+| `frankenjax.e2e.log.v1` | `scenario_id`, `packet_id`, `fixture_id`, `mode`, `ts_utc_unix_ms`, `env`, `replay_command`, `input_capture`, `intermediate_states`, `output_capture`, `artifact_refs`, `result`, `details` | `crates/fj-conformance/tests/e2e.rs`, `crates/fj-conformance/tests/e2e_p2c003.rs`; fallback synthesis in `scripts/run_e2e.sh` |
+| `frankenjax.golden-journey.v1` | `scenario_id`, `scenario_category`, `replay_command`, `input_capture`, `assertions`, `output_capture`, `result`, `duration_ms` | `crates/fj-conformance/tests/golden_journeys.rs` |
+| `frankenjax.failure-diagnostic.v1` | `gate`, `test`, `status`, `summary`, `detail_path`, `replay_cmd`, `timestamp_unix_ms` | `crates/fj-conformance/tests/failure_forensics.rs`; manifest generation scripts |
+| `frankenjax.run-manifest.v1` | `run_id`, `summary`, `gate_results`, `failures`, `artifact_index`, `env` | `scripts/generate_run_manifest.sh`; CI artifact aggregation |
+
+### 18.3 Coverage Gaps (Prioritized)
+
+| Priority | Gap | Why it matters | Next enforcement hook |
+|---|---|---|---|
+| `P0` | No unified cross-crate “error taxonomy conformance” suite | error/fail-closed claims are currently distributed and could drift silently | add conformance meta-suite in `fj-conformance` consuming sections 15/16 matrices |
+| `P0` | Packet E2E coverage is concentrated in `P2C-001` and `P2C-003` | structural docs now cover broader surfaces than current scenario corpus | add scenario packets for `P2C-004/005/008` with forensic logs |
+| `P1` | Durability is strongly unit-tested but lacks dedicated scenario-style E2E journey | end-to-end operator workflow (generate->scrub->proof->gate) should be replayable as one scenario | add durability E2E test binary and include in `run_e2e.sh` discovery set |
+| `P1` | Behavior-to-test mapping is documented but not machine-checked | future edits could invalidate crosswalk completeness | add CI check that verifies crosswalk rows map to existing tests/log schemas |
+| `P2` | E2E `seed` is often `None` in current forensic logs | reduces deterministic replay depth for randomized scenarios | standardize deterministic seed capture for E2E harnesses |
+
+### 18.4 Corpus Inventory Snapshot
+
+- Conformance integration tests: `artifact_schemas`, `e2e`, `e2e_p2c003`, `failure_forensics`, `golden_journeys`, `ir_core_oracle`, `pe_staging_oracle`, `smoke`, `transforms`.
+- E2E orchestration entrypoint: `scripts/run_e2e.sh` (packet/scenario filters, forensic log fallback generation).
+- Reliability gate orchestration: `scripts/enforce_quality_gates.sh` (coverage, flake, runtime, crash, perf, consolidated gate report).
+- Flake detector report schema path: `scripts/detect_flakes.sh` -> `artifacts/ci/flake_report.v1.json`.
+
+## 19. Section-Level Confidence Annotations (DOC-PASS-14)
+
+Confidence scale:
+- `High`: directly validated against current repository sources with low interpretation risk.
+- `Medium-High`: source-anchored synthesis with limited inference.
+- `Medium`: source-anchored but more sensitive to fixture churn or future implementation changes.
+
+| Section | Confidence | Basis | Revalidation trigger |
+|---|---|---|---|
+| `1. Legacy Oracle` | `High` | canonical upstream/local legacy paths are explicit and stable | path relocation or legacy snapshot refresh |
+| `2. High-Value File/Function Anchors` | `High` | anchors point to concrete modules/functions in current legacy tree | legacy refactor in mapped files |
+| `3. Semantic Hotspots` | `Medium-High` | hotspots are source-derived but prioritization is analytical | parity drift or transform-surface expansion |
+| `4. Conformance Fixture Family Anchors` | `Medium` | fixture families are source-backed but corpus can evolve rapidly | fixture version update or new packet additions |
+| `5. Compatibility-Critical Inputs for Cache Keying` | `Medium-High` | mapped from cache/compiler sources and current Rust cache surfaces | cache-key schema or compatibility policy change |
+| `6. Security and Reliability Risk Areas` | `Medium-High` | threat surfaces tie to concrete modules and doctrine | new threat model or gate-topology changes |
+| `7. Extraction Boundary (Current)` | `Medium-High` | boundary map reflects current crate roles and known missing slices | major crate decomposition or merge |
+| `8. Workspace Topology (Current Rust Slice)` | `High` | directly aligned with workspace members and crate graph | workspace membership changes |
+| `9. Hidden/Implicit Coupling Register` | `Medium-High` | couplings are source-grounded cross-crate inferences | major integration rewiring |
+| `10. Conflict Check: Current vs Target Architecture` | `High` | corrected against current workspace (`fj-trace` present; other target crates absent) | introduction of `fj-transforms`/`fj-lowering`/backend facade crates |
+| `11. Symbol/API Census and Surface Classification` | `Medium-High` | counts and surface classes are source-derived as of 2026-02-15 | any `pub` surface churn |
+| `12. Data Model, State, and Invariant Mapping` | `Medium-High` | maps concrete types/invariants but includes synthesis across layers | IR/runtime model expansion |
+| `13. Execution-Path Tracing and Control-Flow Narratives` | `Medium` | narratives are source-anchored but depend on evolving orchestration paths | dispatch/runtime/CI flow rewrites |
+| `14. Concurrency/Lifecycle Semantics and Ordering Guarantees` | `Medium-High` | lifecycle/order claims tied to concrete tests and crate behavior | async/runtime integration enablement |
+| `15. Error Taxonomy, Failure Modes, and Recovery Semantics` | `Medium-High` | error classes anchored to typed error enums and gate scripts | new error domains or policy shifts |
+| `16. Security/Compatibility Edge Cases and Undefined Zones` | `Medium` | explicit undefined zones are documented but expected to shrink | packet closure of currently undefined surfaces |
+| `17. Pass-A Closure Crosswalk` | `Medium-High` | crosswalk is internally consistent with documented sections and gap matrix | gap matrix revision |
+| `18. Unit/E2E Test Corpus and Logging Evidence Crosswalk` | `Medium` | mapped to current test/log corpus, which is actively growing | new tests/schemas or renamed scenarios |
+
+Pass-A structure specialist note:
+- This confidence table should be refreshed whenever bead `bd-3dl.23.14` (final consistency/sign-off) runs, and at every major crate-boundary change.

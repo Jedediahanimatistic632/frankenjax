@@ -3,33 +3,51 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUDGETS_JSON="$ROOT_DIR/artifacts/ci/reliability_budgets.v1.json"
-COVERAGE_RAW_JSON="$ROOT_DIR/artifacts/ci/coverage_raw_llvmcov.v1.json"
-COVERAGE_REPORT_JSON="$ROOT_DIR/artifacts/ci/coverage_report.v1.json"
-COVERAGE_TREND_JSON="$ROOT_DIR/artifacts/ci/coverage_trend.v1.json"
-FLAKE_REPORT_JSON="$ROOT_DIR/artifacts/ci/flake_report.v1.json"
-RUNTIME_REPORT_JSON="$ROOT_DIR/artifacts/ci/runtime_report.v1.json"
-CRASH_REPORT_JSON="$ROOT_DIR/artifacts/ci/crash_report.v1.json"
 GATE_REPORT_JSON="$ROOT_DIR/artifacts/ci/reliability_gate_report.v1.json"
+CRASH_REPORT_JSON="$ROOT_DIR/artifacts/ci/crash_report.v1.json"
 
-SKIP_COVERAGE=0
-SKIP_FLAKE=0
-SKIP_RUNTIME=0
-SKIP_CRASH=0
-SKIP_PERF=0
-FLAKE_RUNS_OVERRIDE=""
+RUN_ID=""
+ARTIFACT_ROOT="$ROOT_DIR/ci-artifacts"
+
+SKIP_G1=0
+SKIP_G2=0
+SKIP_G3=0
+SKIP_G4=0
+SKIP_G5=0
+SKIP_G6=0
+SKIP_G7=0
+SKIP_G8=0
+
+warn_legacy_skip_flake=0
 
 usage() {
   cat <<'USAGE'
 Usage: ./scripts/enforce_quality_gates.sh [options]
 
+Ordered fail-fast gates:
+  G1 = fmt/lint
+  G2 = unit/property tests
+  G3 = differential conformance
+  G4 = adversarial/crash regression
+  G5 = E2E scenarios
+  G6 = performance regression
+  G7 = artifact schema validation
+  G8 = durability decode-proof verification
+
 Options:
   --budgets <path>         Reliability budget JSON path.
-  --skip-coverage          Skip coverage gate.
-  --skip-flake             Skip flake gate.
-  --skip-runtime           Skip runtime gate.
-  --skip-crash             Skip crash/P0 triage gate.
-  --skip-perf              Skip performance regression gate.
-  --flake-runs <n>         Override flake runs (default from budgets).
+  --run-id <id>            Explicit run id (default: timestamp-shortsha).
+  --artifact-root <path>   Root directory for run artifacts (default: ./ci-artifacts).
+  --skip-g1 ... --skip-g8  Skip specific gate(s).
+
+Legacy option aliases (kept for compatibility):
+  --skip-runtime           Alias for --skip-g2 --skip-g3 --skip-g5
+  --skip-crash             Alias for --skip-g4
+  --skip-perf              Alias for --skip-g6
+  --skip-coverage          Alias for --skip-g7
+  --skip-flake             No-op (flake is not a standalone G1..G8 gate)
+  --flake-runs <n>         No-op (accepted for compatibility)
+
   -h, --help               Show this help.
 USAGE
 }
@@ -40,28 +58,69 @@ while [[ $# -gt 0 ]]; do
       BUDGETS_JSON="$2"
       shift 2
       ;;
-    --skip-coverage)
-      SKIP_COVERAGE=1
+    --run-id)
+      RUN_ID="$2"
+      shift 2
+      ;;
+    --artifact-root)
+      ARTIFACT_ROOT="$2"
+      shift 2
+      ;;
+    --skip-g1)
+      SKIP_G1=1
       shift
       ;;
-    --skip-flake)
-      SKIP_FLAKE=1
+    --skip-g2)
+      SKIP_G2=1
+      shift
+      ;;
+    --skip-g3)
+      SKIP_G3=1
+      shift
+      ;;
+    --skip-g4)
+      SKIP_G4=1
+      shift
+      ;;
+    --skip-g5)
+      SKIP_G5=1
+      shift
+      ;;
+    --skip-g6)
+      SKIP_G6=1
+      shift
+      ;;
+    --skip-g7)
+      SKIP_G7=1
+      shift
+      ;;
+    --skip-g8)
+      SKIP_G8=1
       shift
       ;;
     --skip-runtime)
-      SKIP_RUNTIME=1
+      SKIP_G2=1
+      SKIP_G3=1
+      SKIP_G5=1
       shift
       ;;
     --skip-crash)
-      SKIP_CRASH=1
+      SKIP_G4=1
       shift
       ;;
     --skip-perf)
-      SKIP_PERF=1
+      SKIP_G6=1
+      shift
+      ;;
+    --skip-coverage)
+      SKIP_G7=1
+      shift
+      ;;
+    --skip-flake)
+      warn_legacy_skip_flake=1
       shift
       ;;
     --flake-runs)
-      FLAKE_RUNS_OVERRIDE="$2"
       shift 2
       ;;
     -h|--help)
@@ -76,7 +135,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mkdir -p "$ROOT_DIR/artifacts/ci"
+if [[ $warn_legacy_skip_flake -eq 1 ]]; then
+  echo "[warn] --skip-flake is a compatibility no-op in the G1..G8 pipeline." >&2
+fi
 
 if [[ ! -f "$BUDGETS_JSON" ]]; then
   echo "error: budgets file not found at $BUDGETS_JSON" >&2
@@ -88,309 +149,150 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-coverage_pass=true
-flake_pass=true
-runtime_pass=true
-crash_pass=true
-perf_pass=true
+mkdir -p "$ROOT_DIR/artifacts/ci"
+mkdir -p "$ARTIFACT_ROOT"
 
-coverage_failures_tmp="$(mktemp)"
-runtime_entries_tmp="$(mktemp)"
-coverage_entries_tmp="$(mktemp)"
-trap 'rm -f "$coverage_failures_tmp" "$runtime_entries_tmp" "$coverage_entries_tmp"' EXIT
-
-start_pipeline_s="$(date +%s)"
-
-if [[ $SKIP_COVERAGE -eq 0 ]]; then
-  echo "[coverage] running cargo llvm-cov..."
-  cargo llvm-cov --workspace --json --summary-only --output-path "$COVERAGE_RAW_JSON" >/dev/null
-
-  mapfile -t crates < <(jq -r '.coverage | keys[]' "$BUDGETS_JSON")
-  for crate in "${crates[@]}"; do
-    line_floor="$(jq -r ".coverage[\"$crate\"].line_min_percent" "$BUDGETS_JSON")"
-    branch_floor="$(jq -r ".coverage[\"$crate\"].branch_min_percent" "$BUDGETS_JSON")"
-
-    line_count="$(jq "[.data[0].files[] | select(.filename|contains(\"/crates/$crate/\")) | .summary.lines.count] | add // 0" "$COVERAGE_RAW_JSON")"
-    line_covered="$(jq "[.data[0].files[] | select(.filename|contains(\"/crates/$crate/\")) | .summary.lines.covered] | add // 0" "$COVERAGE_RAW_JSON")"
-
-    branch_count="$(jq "[.data[0].files[] | select(.filename|contains(\"/crates/$crate/\")) | .summary.branches.count] | add // 0" "$COVERAGE_RAW_JSON")"
-    branch_covered="$(jq "[.data[0].files[] | select(.filename|contains(\"/crates/$crate/\")) | .summary.branches.covered] | add // 0" "$COVERAGE_RAW_JSON")"
-
-    region_count="$(jq "[.data[0].files[] | select(.filename|contains(\"/crates/$crate/\")) | .summary.regions.count] | add // 0" "$COVERAGE_RAW_JSON")"
-    region_covered="$(jq "[.data[0].files[] | select(.filename|contains(\"/crates/$crate/\")) | .summary.regions.covered] | add // 0" "$COVERAGE_RAW_JSON")"
-
-    line_percent="0"
-    if [[ "$line_count" -gt 0 ]]; then
-      line_percent="$(awk -v c="$line_covered" -v t="$line_count" 'BEGIN { printf "%.4f", 100.0 * c / t }')"
-    fi
-
-    branch_source="branches"
-    branch_percent="0"
-    if [[ "$branch_count" -gt 0 ]]; then
-      branch_percent="$(awk -v c="$branch_covered" -v t="$branch_count" 'BEGIN { printf "%.4f", 100.0 * c / t }')"
-    else
-      branch_source="regions"
-      if [[ "$region_count" -gt 0 ]]; then
-        branch_percent="$(awk -v c="$region_covered" -v t="$region_count" 'BEGIN { printf "%.4f", 100.0 * c / t }')"
-      fi
-    fi
-
-    line_ok="$(awk -v p="$line_percent" -v f="$line_floor" 'BEGIN { print (p + 0 >= f + 0) ? "true" : "false" }')"
-    branch_ok="$(awk -v p="$branch_percent" -v f="$branch_floor" 'BEGIN { print (p + 0 >= f + 0) ? "true" : "false" }')"
-
-    if [[ "$line_ok" != "true" || "$branch_ok" != "true" ]]; then
-      coverage_pass=false
-      printf '%s\n' "$crate" >>"$coverage_failures_tmp"
-    fi
-
-    jq -nc \
-      --arg crate "$crate" \
-      --argjson line_percent "$line_percent" \
-      --argjson line_floor "$line_floor" \
-      --argjson branch_percent "$branch_percent" \
-      --argjson branch_floor "$branch_floor" \
-      --arg branch_source "$branch_source" \
-      --argjson line_ok "$line_ok" \
-      --argjson branch_ok "$branch_ok" \
-      '{
-        crate: $crate,
-        line_percent: $line_percent,
-        line_floor: $line_floor,
-        branch_percent: $branch_percent,
-        branch_floor: $branch_floor,
-        branch_source: $branch_source,
-        line_ok: $line_ok,
-        branch_ok: $branch_ok
-      }' \
-      >>"$coverage_entries_tmp"
-  done
-
-  jq -s \
-    --arg schema_version "frankenjax.coverage-report.v1" \
-    --arg raw_report_path "$COVERAGE_RAW_JSON" \
-    --argjson passed "$coverage_pass" \
-    '{
-      schema_version: $schema_version,
-      raw_report_path: $raw_report_path,
-      passed: $passed,
-      crates: .
-    }' \
-    "$coverage_entries_tmp" >"$COVERAGE_REPORT_JSON"
-
-  if [[ -f "$COVERAGE_TREND_JSON" ]]; then
-    for crate in "${crates[@]}"; do
-      prev_line_percent="$(
-        jq -r \
-          --arg crate "$crate" \
-          '.snapshots[-1].crates[]? | select(.crate == $crate) | .line_percent // empty' \
-          "$COVERAGE_TREND_JSON"
-      )"
-      if [[ -z "$prev_line_percent" ]]; then
-        continue
-      fi
-
-      curr_line_percent="$(
-        jq -r \
-          --arg crate "$crate" \
-          '.crates[] | select(.crate == $crate) | .line_percent' \
-          "$COVERAGE_REPORT_JSON"
-      )"
-
-      regressed="$(
-        awk -v prev="$prev_line_percent" -v curr="$curr_line_percent" \
-          'BEGIN { print ((prev - curr) > 2.0) ? "true" : "false" }'
-      )"
-      if [[ "$regressed" == "true" ]]; then
-        coverage_pass=false
-        echo "[coverage] regression >2% for $crate: prev=$prev_line_percent current=$curr_line_percent" >&2
-      fi
-    done
-  fi
-
-  snapshot_tmp="$(mktemp)"
-  trend_tmp="$(mktemp)"
-  jq -n \
-    --argjson ts_unix_ms "$(date +%s%3N)" \
-    --slurpfile report "$COVERAGE_REPORT_JSON" \
-    '{
-      ts_unix_ms: $ts_unix_ms,
-      crates: $report[0].crates
-    }' >"$snapshot_tmp"
-
-  if [[ -s "$COVERAGE_TREND_JSON" ]] \
-    && jq -e '.schema_version == "frankenjax.coverage-trend.v1" and (.snapshots | type == "array")' \
-      "$COVERAGE_TREND_JSON" >/dev/null 2>&1; then
-    jq --slurpfile snap "$snapshot_tmp" '.snapshots += $snap' "$COVERAGE_TREND_JSON" >"$trend_tmp"
-  else
-    jq --slurpfile snap "$snapshot_tmp" \
-      '{schema_version: "frankenjax.coverage-trend.v1", snapshots: $snap}' >"$trend_tmp"
-  fi
-
-  mv "$trend_tmp" "$COVERAGE_TREND_JSON"
-  rm -f "$snapshot_tmp"
-
-  if [[ "$coverage_pass" != "true" ]]; then
-    echo "[coverage] failed floors for crate(s): $(paste -sd, "$coverage_failures_tmp")" >&2
-  else
-    echo "[coverage] all crate floors satisfied"
-  fi
-else
-  echo "[coverage] skipped"
+if [[ -z "$RUN_ID" ]]; then
+  git_sha="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+  RUN_ID="$(date +%Y%m%d-%H%M%S)-${git_sha}"
 fi
 
-if [[ $SKIP_FLAKE -eq 0 ]]; then
-  flake_runs="$(jq -r '.flake.runs' "$BUDGETS_JSON")"
-  if [[ -n "$FLAKE_RUNS_OVERRIDE" ]]; then
-    flake_runs="$FLAKE_RUNS_OVERRIDE"
-  fi
-  max_suite_flake_rate="$(jq -r '.flake.max_suite_flake_rate' "$BUDGETS_JSON")"
+RUN_DIR="$ARTIFACT_ROOT/$RUN_ID"
+mkdir -p "$RUN_DIR"
 
-  echo "[flake] running detector for ${flake_runs} runs..."
-  set +e
-  "$ROOT_DIR/scripts/detect_flakes.sh" \
-    --runs "$flake_runs" \
-    --out "$FLAKE_REPORT_JSON" \
-    --log-dir "$ROOT_DIR/artifacts/ci/flake-runs"
-  detector_rc=$?
-  set -e
+USE_RCH=0
+if command -v rch >/dev/null 2>&1 && [[ "${FJ_DISABLE_RCH:-0}" != "1" ]]; then
+  USE_RCH=1
+fi
 
-  if [[ ! -f "$FLAKE_REPORT_JSON" ]]; then
-    echo "[flake] missing flake report" >&2
-    flake_pass=false
+now_ms() {
+  date +%s%3N
+}
+
+run_cargo() {
+  if [[ $USE_RCH -eq 1 ]]; then
+    rch exec -- cargo "$@"
   else
-    suite_flake_rate="$(jq -r '.suite_flake_rate' "$FLAKE_REPORT_JSON")"
-    rate_ok="$(awk -v p="$suite_flake_rate" -v f="$max_suite_flake_rate" 'BEGIN { print (p + 0 <= f + 0) ? "true" : "false" }')"
-    if [[ $detector_rc -ne 0 || "$rate_ok" != "true" ]]; then
-      flake_pass=false
-      echo "[flake] gate failed (rate=${suite_flake_rate}, max=${max_suite_flake_rate})" >&2
-    else
-      echo "[flake] gate passed"
-    fi
+    cargo "$@"
   fi
-else
-  echo "[flake] skipped"
-fi
+}
 
-if [[ $SKIP_RUNTIME -eq 0 ]]; then
-  RUNTIME_LOG_DIR="$ROOT_DIR/artifacts/ci/runtime-logs"
-  mkdir -p "$RUNTIME_LOG_DIR"
+trim_summary() {
+  local file="$1"
+  local summary
+  summary="$(tail -n 30 "$file" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+  if [[ -z "$summary" ]]; then
+    summary="gate command failed"
+  fi
+  printf '%s' "${summary:0:200}"
+}
 
-  run_runtime_check() {
-    local key="$1"
-    local command="$2"
-    local budget
-    budget="$(jq -r ".runtime_seconds[\"$key\"]" "$BUDGETS_JSON")"
+gate_name() {
+  case "$1" in
+    G1) echo "fmt_lint" ;;
+    G2) echo "unit_property_tests" ;;
+    G3) echo "differential_conformance" ;;
+    G4) echo "adversarial_crash_regression" ;;
+    G5) echo "e2e_scenarios" ;;
+    G6) echo "performance_regression" ;;
+    G7) echo "artifact_schema_validation" ;;
+    G8) echo "durability_decode_proof" ;;
+    *) echo "unknown_gate" ;;
+  esac
+}
 
-    local log_file="$RUNTIME_LOG_DIR/${key}.log"
-    local start_s end_s duration_s rc status
+gate_replay_cmd() {
+  case "$1" in
+    G1) echo "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings" ;;
+    G2) echo "cargo test --workspace" ;;
+    G3) echo "cargo test -p fj-conformance --test transforms -- --nocapture" ;;
+    G4) echo "jq -s 'map(select(.severity==\"P0\" and ((.status // \"open\") != \"closed\") and ((.status // \"open\") != \"resolved\"))) | length' crates/fj-conformance/fuzz/corpus/crashes/index.v1.jsonl" ;;
+    G5) echo "./scripts/run_e2e.sh" ;;
+    G6) echo "./scripts/check_perf_regression.sh --budgets artifacts/ci/reliability_budgets.v1.json" ;;
+    G7) echo "cargo test -p fj-conformance --test artifact_schemas -- --nocapture" ;;
+    G8) echo "./scripts/durability_ci_gate.sh --skip-generate" ;;
+    *) echo "echo unknown gate" ;;
+  esac
+}
 
-    start_s="$(date +%s)"
-    set +e
-    bash -lc "cd '$ROOT_DIR' && $command" >"$log_file" 2>&1
-    rc=$?
-    set -e
-    end_s="$(date +%s)"
-    duration_s=$((end_s - start_s))
+gate_should_skip() {
+  case "$1" in
+    G1) [[ $SKIP_G1 -eq 1 ]] ;;
+    G2) [[ $SKIP_G2 -eq 1 ]] ;;
+    G3) [[ $SKIP_G3 -eq 1 ]] ;;
+    G4) [[ $SKIP_G4 -eq 1 ]] ;;
+    G5) [[ $SKIP_G5 -eq 1 ]] ;;
+    G6) [[ $SKIP_G6 -eq 1 ]] ;;
+    G7) [[ $SKIP_G7 -eq 1 ]] ;;
+    G8) [[ $SKIP_G8 -eq 1 ]] ;;
+    *) return 1 ;;
+  esac
+}
 
-    status="pass"
-    if [[ $rc -ne 0 || $duration_s -gt $budget ]]; then
-      status="fail"
-      runtime_pass=false
-    fi
+gate_g1() {
+  run_cargo fmt --check
+  run_cargo clippy --workspace --all-targets -- -D warnings
+}
 
-    jq -nc \
-      --arg key "$key" \
-      --arg command "$command" \
-      --argjson budget_seconds "$budget" \
-      --argjson duration_seconds "$duration_s" \
-      --argjson exit_code "$rc" \
-      --arg status "$status" \
-      --arg log_file "$log_file" \
-      '{
-        key: $key,
-        command: $command,
-        budget_seconds: $budget_seconds,
-        duration_seconds: $duration_seconds,
-        exit_code: $exit_code,
-        status: $status,
-        log_file: $log_file
-      }' \
-      >>"$runtime_entries_tmp"
+gate_g2() {
+  run_cargo test --workspace --quiet
+}
 
-    echo "[runtime] $key => $status (${duration_s}s <= ${budget}s?)"
-  }
+gate_g3() {
+  run_cargo test -p fj-conformance --test transforms -- --nocapture
+}
 
-  run_runtime_check "unit_tests_workspace" "cargo test --workspace --quiet"
-  run_runtime_check "property_tests" "cargo test --workspace --quiet"
-  run_runtime_check "differential_oracle" "cargo test -p fj-conformance --test transforms -- --nocapture"
-  run_runtime_check "e2e_scenarios" "./scripts/run_e2e.sh --packet P2C-001"
+gate_g4() {
+  local crash_index_rel crash_index crash_max_open_p0 crash_fail_on_new_p0
+  local crash_known_p0_hashes_json open_p0_count new_open_p0_hashes_json
+  local all_open_p0_json new_open_p0_count passed generated_at_ms
 
-  jq -s \
-    --arg schema_version "frankenjax.runtime-report.v1" \
-    --argjson passed "$runtime_pass" \
-    '{
-      schema_version: $schema_version,
-      passed: $passed,
-      checks: .
-    }' \
-    "$runtime_entries_tmp" >"$RUNTIME_REPORT_JSON"
-else
-  echo "[runtime] skipped"
-fi
-
-if [[ $SKIP_CRASH -eq 0 ]]; then
   crash_index_rel="$(jq -r '.crash_triage.index_path // "crates/fj-conformance/fuzz/corpus/crashes/index.v1.jsonl"' "$BUDGETS_JSON")"
   if [[ "$crash_index_rel" = /* ]]; then
     crash_index="$crash_index_rel"
   else
     crash_index="$ROOT_DIR/$crash_index_rel"
   fi
+
   crash_max_open_p0="$(jq -r '.crash_triage.max_open_p0 // 0' "$BUDGETS_JSON")"
   crash_fail_on_new_p0="$(jq -r '.crash_triage.fail_on_new_p0 // true' "$BUDGETS_JSON")"
   crash_known_p0_hashes_json="$(jq -c '.crash_triage.known_p0_hashes // []' "$BUDGETS_JSON")"
-  crash_generated_at_ms="$(date +%s%3N)"
 
   if [[ -f "$crash_index" && -s "$crash_index" ]]; then
-    open_p0_count="$(
-      jq -s '
-        map(
-          select(
+    open_p0_count="$(jq -s '
+      map(
+        select(
+          .severity == "P0"
+          and ((.status // "open") != "closed")
+          and ((.status // "open") != "resolved")
+        )
+      ) | length
+    ' "$crash_index")"
+
+    new_open_p0_hashes_json="$(jq -s --argjson known "$crash_known_p0_hashes_json" '
+      [
+        .[]
+        | select(
             .severity == "P0"
             and ((.status // "open") != "closed")
             and ((.status // "open") != "resolved")
           )
-        ) | length
-      ' "$crash_index"
-    )"
+        | .crash_hash_sha256
+        | select(. != null)
+        | select(($known | index(.)) | not)
+      ] | unique
+    ' "$crash_index")"
 
-    new_open_p0_hashes_json="$(
-      jq -s --argjson known "$crash_known_p0_hashes_json" '
-        [
-          .[]
-          | select(
-              .severity == "P0"
-              and ((.status // "open") != "closed")
-              and ((.status // "open") != "resolved")
-            )
-          | .crash_hash_sha256
-          | select(. != null)
-          | select(($known | index(.)) | not)
-        ] | unique
-      ' "$crash_index"
-    )"
-
-    all_open_p0_json="$(
-      jq -s '
-        [
-          .[]
-          | select(
-              .severity == "P0"
-              and ((.status // "open") != "closed")
-              and ((.status // "open") != "resolved")
-            )
-        ]
-      ' "$crash_index"
-    )"
+    all_open_p0_json="$(jq -s '
+      [
+        .[]
+        | select(
+            .severity == "P0"
+            and ((.status // "open") != "closed")
+            and ((.status // "open") != "resolved")
+          )
+      ]
+    ' "$crash_index")"
   else
     open_p0_count=0
     new_open_p0_hashes_json='[]'
@@ -398,16 +300,18 @@ if [[ $SKIP_CRASH -eq 0 ]]; then
   fi
 
   new_open_p0_count="$(jq -nr --argjson hashes "$new_open_p0_hashes_json" '$hashes | length')"
+  passed=true
 
   if [[ "$open_p0_count" -gt "$crash_max_open_p0" ]]; then
-    crash_pass=false
-    echo "[crash] open P0 count exceeded: open=${open_p0_count}, max=${crash_max_open_p0}" >&2
+    passed=false
+    echo "open P0 count exceeded: open=${open_p0_count}, max=${crash_max_open_p0}" >&2
   fi
   if [[ "$crash_fail_on_new_p0" == "true" && "$new_open_p0_count" -gt 0 ]]; then
-    crash_pass=false
-    echo "[crash] new open P0 crash(es) detected: count=${new_open_p0_count}" >&2
+    passed=false
+    echo "new open P0 crashes detected: count=${new_open_p0_count}" >&2
   fi
 
+  generated_at_ms="$(now_ms)"
   jq -n \
     --arg schema_version "frankenjax.crash-report.v1" \
     --arg index_path "$crash_index" \
@@ -418,8 +322,8 @@ if [[ $SKIP_CRASH -eq 0 ]]; then
     --argjson known_p0_hashes "$crash_known_p0_hashes_json" \
     --argjson new_open_p0_hashes "$new_open_p0_hashes_json" \
     --argjson open_p0_records "$all_open_p0_json" \
-    --argjson passed "$crash_pass" \
-    --argjson generated_at_unix_ms "$crash_generated_at_ms" \
+    --argjson passed "$passed" \
+    --argjson generated_at_unix_ms "$generated_at_ms" \
     '{
       schema_version: $schema_version,
       generated_at_unix_ms: $generated_at_unix_ms,
@@ -434,115 +338,229 @@ if [[ $SKIP_CRASH -eq 0 ]]; then
       passed: $passed
     }' >"$CRASH_REPORT_JSON"
 
-  if [[ "$crash_pass" == "true" ]]; then
-    echo "[crash] gate passed"
-  fi
-else
-  echo "[crash] skipped"
-fi
+  [[ "$passed" == "true" ]]
+}
 
-if [[ $SKIP_PERF -eq 0 ]]; then
-  PERF_REPORT_JSON="$ROOT_DIR/artifacts/ci/perf_regression_report.v1.json"
-  echo "[perf] running performance regression gate..."
-  set +e
+gate_g5() {
+  "$ROOT_DIR/scripts/run_e2e.sh"
+}
+
+gate_g6() {
   "$ROOT_DIR/scripts/check_perf_regression.sh" --budgets "$BUDGETS_JSON"
-  perf_rc=$?
+}
+
+gate_g7() {
+  run_cargo test -p fj-conformance --test artifact_schemas -- --nocapture
+}
+
+gate_g8() {
+  "$ROOT_DIR/scripts/durability_ci_gate.sh" --skip-generate
+}
+
+gate_results_tmp="$(mktemp)"
+failure_records_tmp="$(mktemp)"
+trap 'rm -f "$gate_results_tmp" "$failure_records_tmp"' EXIT
+
+append_gate_result() {
+  local gate_id="$1"
+  local name="$2"
+  local status="$3"
+  local duration_ms="$4"
+  local failure_count="$5"
+  jq -nc \
+    --arg gate_id "$gate_id" \
+    --arg name "$name" \
+    --arg status "$status" \
+    --argjson duration_ms "$duration_ms" \
+    --argjson failure_count "$failure_count" \
+    '{
+      gate_id: $gate_id,
+      name: $name,
+      status: $status,
+      duration_ms: $duration_ms,
+      failure_count: $failure_count
+    }' >>"$gate_results_tmp"
+}
+
+run_gate() {
+  local gate_id="$1"
+  local fn="$2"
+  local name replay_cmd gate_dir log_file log_rel
+  local started_ms ended_ms duration_ms rc status failure_count
+  local summary failure_rel failure_file gate_diag_rel gate_diag_file
+  local artifact_paths_json
+
+  name="$(gate_name "$gate_id")"
+  replay_cmd="$(gate_replay_cmd "$gate_id")"
+  gate_dir="$RUN_DIR/$gate_id"
+  mkdir -p "$gate_dir"
+
+  log_file="$gate_dir/${name}.log"
+  log_rel="ci-artifacts/$RUN_ID/$gate_id/${name}.log"
+
+  started_ms="$(now_ms)"
+  set +e
+  "$fn" >"$log_file" 2>&1
+  rc=$?
   set -e
-  if [[ $perf_rc -ne 0 ]]; then
-    perf_pass=false
-    echo "[perf] gate failed" >&2
+  ended_ms="$(now_ms)"
+  duration_ms=$((ended_ms - started_ms))
+
+  status="pass"
+  failure_count=0
+  if [[ $rc -ne 0 ]]; then
+    status="fail"
+    failure_count=1
+
+    summary="$(trim_summary "$log_file")"
+    failure_rel="ci-artifacts/$RUN_ID/$gate_id/failure_diagnostic.v1.json"
+    failure_file="$ROOT_DIR/$failure_rel"
+    gate_diag_rel="ci-artifacts/$RUN_ID/$gate_id/gate_diagnostic.v1.json"
+    gate_diag_file="$ROOT_DIR/$gate_diag_rel"
+    artifact_paths_json="$(jq -nc --arg log "$log_rel" --arg diag "$failure_rel" '[ $log, $diag ]')"
+
+    jq -n \
+      --arg schema_version "frankenjax.gate-diagnostic.v1" \
+      --arg gate_id "$gate_id" \
+      --argjson timestamp_unix_ms "$ended_ms" \
+      --arg failing_check "$name" \
+      --arg error_summary "$summary" \
+      --argjson artifact_paths "$artifact_paths_json" \
+      --arg replay_cmd "$replay_cmd" \
+      --argjson exit_code "$rc" \
+      '{
+        schema_version: $schema_version,
+        gate_id: $gate_id,
+        timestamp_unix_ms: $timestamp_unix_ms,
+        failing_check: $failing_check,
+        error_summary: $error_summary,
+        artifact_paths: $artifact_paths,
+        replay_cmd: $replay_cmd,
+        exit_code: $exit_code
+      }' >"$gate_diag_file"
+
+    jq -n \
+      --arg schema_version "frankenjax.failure-diagnostic.v1" \
+      --arg gate "$gate_id" \
+      --arg test "$name" \
+      --arg status "fail" \
+      --arg summary "$summary" \
+      --arg detail_path "$log_rel" \
+      --arg replay_cmd "$replay_cmd" \
+      --argjson related_fixtures '[]' \
+      --argjson timestamp_unix_ms "$ended_ms" \
+      --arg error_output "$(tail -c 500 "$log_file" 2>/dev/null || true)" \
+      --arg root_cause_hint "dependency_error" \
+      '{
+        schema_version: $schema_version,
+        gate: $gate,
+        test: $test,
+        status: $status,
+        summary: $summary,
+        detail_path: $detail_path,
+        replay_cmd: $replay_cmd,
+        related_fixtures: $related_fixtures,
+        timestamp_unix_ms: $timestamp_unix_ms,
+        error_output: (if $error_output == "" then null else $error_output end),
+        root_cause_hint: $root_cause_hint
+      }' >"$failure_file"
+
+    cat "$failure_file" >>"$failure_records_tmp"
+    echo "[$gate_id] FAIL (${duration_ms}ms) -> $log_rel" >&2
   else
-    echo "[perf] gate passed"
+    echo "[$gate_id] PASS (${duration_ms}ms)"
   fi
-else
-  echo "[perf] skipped"
+
+  append_gate_result "$gate_id" "$name" "$status" "$duration_ms" "$failure_count"
+  return "$rc"
+}
+
+pipeline_started_ms="$(now_ms)"
+pipeline_blocked=0
+
+for gate_id in G1 G2 G3 G4 G5 G6 G7 G8; do
+  name="$(gate_name "$gate_id")"
+  if gate_should_skip "$gate_id"; then
+    append_gate_result "$gate_id" "$name" "skipped" 0 0
+    echo "[$gate_id] SKIPPED (explicit)"
+    continue
+  fi
+
+  if [[ $pipeline_blocked -eq 1 ]]; then
+    append_gate_result "$gate_id" "$name" "skipped" 0 0
+    echo "[$gate_id] SKIPPED (blocked by prior gate failure)"
+    continue
+  fi
+
+  case "$gate_id" in
+    G1) run_gate "$gate_id" gate_g1 || pipeline_blocked=1 ;;
+    G2) run_gate "$gate_id" gate_g2 || pipeline_blocked=1 ;;
+    G3) run_gate "$gate_id" gate_g3 || pipeline_blocked=1 ;;
+    G4) run_gate "$gate_id" gate_g4 || pipeline_blocked=1 ;;
+    G5) run_gate "$gate_id" gate_g5 || pipeline_blocked=1 ;;
+    G6) run_gate "$gate_id" gate_g6 || pipeline_blocked=1 ;;
+    G7) run_gate "$gate_id" gate_g7 || pipeline_blocked=1 ;;
+    G8) run_gate "$gate_id" gate_g8 || pipeline_blocked=1 ;;
+  esac
+done
+
+pipeline_finished_ms="$(now_ms)"
+pipeline_duration_ms=$((pipeline_finished_ms - pipeline_started_ms))
+
+gate_results_json="$(jq -s '.' "$gate_results_tmp")"
+failures_json="$(jq -s '.' "$failure_records_tmp")"
+
+failed_count="$(printf '%s\n' "$gate_results_json" | jq '[.[] | select(.status == "fail")] | length')"
+skipped_count="$(printf '%s\n' "$gate_results_json" | jq '[.[] | select(.status == "skipped")] | length')"
+passed_count="$(printf '%s\n' "$gate_results_json" | jq '[.[] | select(.status == "pass")] | length')"
+overall_passed=true
+if [[ "$failed_count" -gt 0 ]]; then
+  overall_passed=false
 fi
 
-end_pipeline_s="$(date +%s)"
-pipeline_duration_s=$((end_pipeline_s - start_pipeline_s))
-full_budget_s="$(jq -r '.runtime_seconds.full_pipeline' "$BUDGETS_JSON")"
-full_pipeline_ok="$(awk -v p="$pipeline_duration_s" -v f="$full_budget_s" 'BEGIN { print (p + 0 <= f + 0) ? "true" : "false" }')"
-
-if [[ "$full_pipeline_ok" != "true" ]]; then
-  runtime_pass=false
-  echo "[runtime] full pipeline budget exceeded (${pipeline_duration_s}s > ${full_budget_s}s)" >&2
-fi
-
-overall_pass=true
-if [[ $SKIP_COVERAGE -eq 0 && "$coverage_pass" != "true" ]]; then
-  overall_pass=false
-fi
-if [[ $SKIP_FLAKE -eq 0 && "$flake_pass" != "true" ]]; then
-  overall_pass=false
-fi
-if [[ $SKIP_RUNTIME -eq 0 && "$runtime_pass" != "true" ]]; then
-  overall_pass=false
-fi
-if [[ $SKIP_CRASH -eq 0 && "$crash_pass" != "true" ]]; then
-  overall_pass=false
-fi
-if [[ $SKIP_PERF -eq 0 && "$perf_pass" != "true" ]]; then
-  overall_pass=false
-fi
-
-generated_at_ms="$(date +%s%3N)"
-
+generated_at_ms="$(now_ms)"
 jq -n \
   --arg schema_version "frankenjax.reliability-gate-report.v1" \
+  --arg run_id "$RUN_ID" \
   --arg budgets_path "$BUDGETS_JSON" \
-  --arg coverage_report "$COVERAGE_REPORT_JSON" \
-  --arg flake_report "$FLAKE_REPORT_JSON" \
-  --arg runtime_report "$RUNTIME_REPORT_JSON" \
-  --arg crash_report "$CRASH_REPORT_JSON" \
-  --argjson coverage_enabled "$((1 - SKIP_COVERAGE))" \
-  --argjson flake_enabled "$((1 - SKIP_FLAKE))" \
-  --argjson runtime_enabled "$((1 - SKIP_RUNTIME))" \
-  --argjson crash_enabled "$((1 - SKIP_CRASH))" \
-  --argjson perf_enabled "$((1 - SKIP_PERF))" \
-  --argjson coverage_pass "$coverage_pass" \
-  --argjson flake_pass "$flake_pass" \
-  --argjson runtime_pass "$runtime_pass" \
-  --argjson crash_pass "$crash_pass" \
-  --argjson perf_pass "$perf_pass" \
-  --argjson full_pipeline_duration_seconds "$pipeline_duration_s" \
-  --argjson full_pipeline_budget_seconds "$full_budget_s" \
+  --arg artifact_root "$ARTIFACT_ROOT" \
   --argjson generated_at_unix_ms "$generated_at_ms" \
-  --argjson overall_passed "$overall_pass" \
+  --argjson full_pipeline_duration_ms "$pipeline_duration_ms" \
+  --argjson passed_count "$passed_count" \
+  --argjson failed_count "$failed_count" \
+  --argjson skipped_count "$skipped_count" \
+  --argjson gate_results "$gate_results_json" \
+  --argjson failures "$failures_json" \
+  --argjson overall_passed "$overall_passed" \
   '{
     schema_version: $schema_version,
     generated_at_unix_ms: $generated_at_unix_ms,
+    run_id: $run_id,
     budgets_path: $budgets_path,
-    coverage: {
-      enabled: ($coverage_enabled == 1),
-      passed: $coverage_pass,
-      report: $coverage_report
+    artifact_root: $artifact_root,
+    full_pipeline_duration_ms: $full_pipeline_duration_ms,
+    gate_summary: {
+      passed: $passed_count,
+      failed: $failed_count,
+      skipped: $skipped_count
     },
-    flake: {
-      enabled: ($flake_enabled == 1),
-      passed: $flake_pass,
-      report: $flake_report
-    },
-    runtime: {
-      enabled: ($runtime_enabled == 1),
-      passed: $runtime_pass,
-      report: $runtime_report,
-      full_pipeline_duration_seconds: $full_pipeline_duration_seconds,
-      full_pipeline_budget_seconds: $full_pipeline_budget_seconds
-    },
-    crash: {
-      enabled: ($crash_enabled == 1),
-      passed: $crash_pass,
-      report: $crash_report
-    },
-    perf: {
-      enabled: ($perf_enabled == 1),
-      passed: $perf_pass
-    },
+    gate_results: $gate_results,
+    failures: $failures,
     overall_passed: $overall_passed
   }' >"$GATE_REPORT_JSON"
 
-echo "Reliability gate report written: $GATE_REPORT_JSON"
+cp "$GATE_REPORT_JSON" "$RUN_DIR/reliability_gate_report.v1.json"
 
-if [[ "$overall_pass" != "true" ]]; then
+if [[ -x "$ROOT_DIR/scripts/generate_run_manifest.sh" ]]; then
+  "$ROOT_DIR/scripts/generate_run_manifest.sh" \
+    --run-id "$RUN_ID" \
+    --output "$RUN_DIR" \
+    --gate-report "$GATE_REPORT_JSON" >/dev/null || true
+fi
+
+echo "Reliability gate report written: $GATE_REPORT_JSON"
+echo "Run artifacts: $RUN_DIR"
+
+if [[ "$overall_passed" != "true" ]]; then
   exit 1
 fi

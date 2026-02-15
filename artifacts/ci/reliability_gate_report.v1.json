@@ -1,28 +1,87 @@
 {
   "schema_version": "frankenjax.reliability-gate-report.v1",
-  "generated_at_unix_ms": 1771102304848,
-  "budgets_path": "/data/projects/frankenjax/artifacts/ci/reliability_budgets.v1.json",
-  "coverage": {
-    "enabled": false,
-    "passed": true,
-    "report": "/data/projects/frankenjax/artifacts/ci/coverage_report.v1.json"
+  "generated_at_unix_ms": 1771122025780,
+  "run_id": "smoke-failure-g4",
+  "budgets_path": "/data/tmp/tmp.APQ4WYlmdL",
+  "artifact_root": "/data/projects/frankenjax/ci-artifacts",
+  "full_pipeline_duration_ms": 89,
+  "gate_summary": {
+    "passed": 0,
+    "failed": 1,
+    "skipped": 7
   },
-  "flake": {
-    "enabled": false,
-    "passed": true,
-    "report": "/data/projects/frankenjax/artifacts/ci/flake_report.v1.json"
-  },
-  "runtime": {
-    "enabled": false,
-    "passed": true,
-    "report": "/data/projects/frankenjax/artifacts/ci/runtime_report.v1.json",
-    "full_pipeline_duration_seconds": 0,
-    "full_pipeline_budget_seconds": 600
-  },
-  "crash": {
-    "enabled": true,
-    "passed": true,
-    "report": "/data/projects/frankenjax/artifacts/ci/crash_report.v1.json"
-  },
-  "overall_passed": true
+  "gate_results": [
+    {
+      "gate_id": "G1",
+      "name": "fmt_lint",
+      "status": "skipped",
+      "duration_ms": 0,
+      "failure_count": 0
+    },
+    {
+      "gate_id": "G2",
+      "name": "unit_property_tests",
+      "status": "skipped",
+      "duration_ms": 0,
+      "failure_count": 0
+    },
+    {
+      "gate_id": "G3",
+      "name": "differential_conformance",
+      "status": "skipped",
+      "duration_ms": 0,
+      "failure_count": 0
+    },
+    {
+      "gate_id": "G4",
+      "name": "adversarial_crash_regression",
+      "status": "fail",
+      "duration_ms": 26,
+      "failure_count": 1
+    },
+    {
+      "gate_id": "G5",
+      "name": "e2e_scenarios",
+      "status": "skipped",
+      "duration_ms": 0,
+      "failure_count": 0
+    },
+    {
+      "gate_id": "G6",
+      "name": "performance_regression",
+      "status": "skipped",
+      "duration_ms": 0,
+      "failure_count": 0
+    },
+    {
+      "gate_id": "G7",
+      "name": "artifact_schema_validation",
+      "status": "skipped",
+      "duration_ms": 0,
+      "failure_count": 0
+    },
+    {
+      "gate_id": "G8",
+      "name": "durability_decode_proof",
+      "status": "skipped",
+      "duration_ms": 0,
+      "failure_count": 0
+    }
+  ],
+  "failures": [
+    {
+      "schema_version": "frankenjax.failure-diagnostic.v1",
+      "gate": "G4",
+      "test": "adversarial_crash_regression",
+      "status": "fail",
+      "summary": "open P0 count exceeded: open=0, max=-1",
+      "detail_path": "ci-artifacts/smoke-failure-g4/G4/adversarial_crash_regression.log",
+      "replay_cmd": "jq -s 'map(select(.severity==\"P0\" and ((.status // \"open\") != \"closed\") and ((.status // \"open\") != \"resolved\"))) | length' crates/fj-conformance/fuzz/corpus/crashes/index.v1.jsonl",
+      "related_fixtures": [],
+      "timestamp_unix_ms": 1771122025715,
+      "error_output": "open P0 count exceeded: open=0, max=-1",
+      "root_cause_hint": "dependency_error"
+    }
+  ],
+  "overall_passed": false
 }

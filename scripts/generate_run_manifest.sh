@@ -3,21 +3,17 @@
 # and artifact index for the current run.
 #
 # Usage:
-#   ./scripts/generate_run_manifest.sh [--run-id <id>] [--output <path>]
-#
-# If --run-id is omitted, generates one from timestamp + git sha.
-# Scans artifacts/ for test logs, e2e logs, golden journeys, coverage, etc.
-# Produces manifest.json + summary.txt for human review.
+#   ./scripts/generate_run_manifest.sh [--run-id <id>] [--output <path>] [--gate-report <path>]
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID=""
 OUTPUT_DIR=""
-STARTED_AT=""
+GATE_REPORT="$ROOT_DIR/artifacts/ci/reliability_gate_report.v1.json"
 
 usage() {
-  echo "Usage: $0 [--run-id <id>] [--output <dir>]"
+  echo "Usage: $0 [--run-id <id>] [--output <dir>] [--gate-report <path>]"
   exit 1
 }
 
@@ -25,16 +21,16 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --run-id) RUN_ID="$2"; shift 2 ;;
     --output) OUTPUT_DIR="$2"; shift 2 ;;
+    --gate-report) GATE_REPORT="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "Unknown option: $1"; usage ;;
   esac
 done
 
-# Generate run ID if not provided
 if [[ -z "$RUN_ID" ]]; then
-  GIT_SHA=$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-  RUN_ID="${TIMESTAMP}-${GIT_SHA}"
+  git_sha="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  RUN_ID="${timestamp}-${git_sha}"
 fi
 
 if [[ -z "$OUTPUT_DIR" ]]; then
@@ -43,17 +39,52 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-STARTED_AT=$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')
+STARTED_AT="$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')"
+RUST_VERSION="$(rustc --version 2>/dev/null || echo "unknown")"
+OS_INFO="$(uname -srm 2>/dev/null || echo "unknown")"
+GIT_SHA_FULL="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+GIT_BRANCH="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
 
-# ---- Collect environment ----
-RUST_VERSION=$(rustc --version 2>/dev/null || echo "unknown")
-OS_INFO=$(uname -srm 2>/dev/null || echo "unknown")
-GIT_SHA_FULL=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
-GIT_BRANCH=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+CI_RUN_DIR="$ROOT_DIR/ci-artifacts/$RUN_ID"
 
-# ---- Scan for artifacts ----
 declare -a ARTIFACT_INDEX=()
 ARTIFACT_COUNT=0
+
+add_artifact_entry() {
+  local file="$1"
+  local category="$2"
+  local rel_path size sha gate_id test_id entry
+
+  rel_path="${file#$ROOT_DIR/}"
+  size="$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)"
+  sha="$(sha256sum "$file" 2>/dev/null | cut -d' ' -f1 || echo "")"
+  gate_id=""
+  test_id=""
+
+  if [[ "$category" == "failure_diagnostic" ]]; then
+    gate_id="$(jq -r '.gate // empty' "$file" 2>/dev/null || true)"
+    test_id="$(jq -r '.test // empty' "$file" 2>/dev/null || true)"
+  fi
+
+  entry="$(jq -nc \
+    --arg path "$rel_path" \
+    --arg category "$category" \
+    --argjson size_bytes "$size" \
+    --arg sha256 "$sha" \
+    --arg gate_id "$gate_id" \
+    --arg test_id "$test_id" \
+    '{
+      path: $path,
+      category: $category,
+      size_bytes: $size_bytes,
+      sha256: $sha256
+    }
+    + (if $gate_id != "" then {gate_id: $gate_id} else {} end)
+    + (if $test_id != "" then {test_id: $test_id} else {} end)')"
+
+  ARTIFACT_INDEX+=("$entry")
+  ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
+}
 
 scan_artifacts() {
   local dir="$1"
@@ -65,14 +96,7 @@ scan_artifacts() {
   fi
 
   while IFS= read -r -d '' file; do
-    local size
-    size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
-    local rel_path="${file#$ROOT_DIR/}"
-    local sha=""
-    sha=$(sha256sum "$file" 2>/dev/null | cut -d' ' -f1 || echo "")
-
-    ARTIFACT_INDEX+=("{\"path\":\"${rel_path}\",\"category\":\"${category}\",\"size_bytes\":${size},\"sha256\":\"${sha}\"}")
-    ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
+    add_artifact_entry "$file" "$category"
   done < <(find "$dir" -name "$pattern" -type f -print0 2>/dev/null)
 }
 
@@ -82,161 +106,126 @@ scan_artifacts "$ROOT_DIR/artifacts/e2e/golden_journeys" "golden_journey" "*.gol
 scan_artifacts "$ROOT_DIR/artifacts/testing" "coverage_report" "*.coverage.*.json"
 scan_artifacts "$ROOT_DIR/artifacts/ci" "other" "*.v1.json"
 scan_artifacts "$ROOT_DIR/artifacts/performance/evidence" "perf_delta" "*.json"
+scan_artifacts "$ROOT_DIR/artifacts/crash-triage" "crash_triage" "*.json"
+scan_artifacts "$ROOT_DIR/artifacts/durability" "durability_sidecar" "*.json"
 
-# ---- Scan for failures from gate reports ----
-GATE_REPORT="$ROOT_DIR/artifacts/ci/reliability_gate_report.v1.json"
-declare -a FAILURES=()
-declare -a GATE_RESULTS=()
-TOTAL_TESTS=0
-PASSED=0
-FAILED=0
-SKIPPED=0
+if [[ -d "$CI_RUN_DIR" ]]; then
+  scan_artifacts "$CI_RUN_DIR" "failure_diagnostic" "failure_diagnostic.v1.json"
+  scan_artifacts "$CI_RUN_DIR" "other" "gate_diagnostic.v1.json"
+  scan_artifacts "$CI_RUN_DIR" "other" "*.log"
+fi
+
+if [[ "$OUTPUT_DIR" != "$CI_RUN_DIR" && -d "$OUTPUT_DIR" ]]; then
+  scan_artifacts "$OUTPUT_DIR" "failure_diagnostic" "failure_diagnostic.v1.json"
+  scan_artifacts "$OUTPUT_DIR" "other" "gate_diagnostic.v1.json"
+  scan_artifacts "$OUTPUT_DIR" "other" "*.log"
+fi
+
+GATE_RESULTS_JSON='[]'
+FAILURES_JSON='[]'
 OVERALL="pass"
 
 if [[ -f "$GATE_REPORT" ]]; then
-  # Extract gate-level results
-  GATES=$(python3 -c "
-import json, sys
-with open('$GATE_REPORT') as f:
-    data = json.load(f)
-gates = []
-for key in ['coverage', 'flake', 'runtime', 'crash', 'perf']:
-    section = data.get(key, {})
-    status = 'pass' if section.get('passed', section.get('pass', True)) else 'fail'
-    gates.append({'gate_id': key, 'name': key, 'status': status, 'duration_ms': 0})
-overall = 'pass' if data.get('overall_pass', True) else 'fail'
-print(json.dumps({'gates': gates, 'overall': overall}))
-" 2>/dev/null || echo '{"gates":[],"overall":"pass"}')
-
-  OVERALL=$(echo "$GATES" | python3 -c "import json,sys; print(json.load(sys.stdin)['overall'])" 2>/dev/null || echo "pass")
-
-  while IFS= read -r gate_json; do
-    GATE_RESULTS+=("$gate_json")
-  done < <(echo "$GATES" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for g in data['gates']:
-    print(json.dumps(g))
-" 2>/dev/null)
+  if jq -e '.gate_results | type == "array"' "$GATE_REPORT" >/dev/null 2>&1; then
+    GATE_RESULTS_JSON="$(jq -c '.gate_results' "$GATE_REPORT")"
+    OVERALL="$(jq -r 'if (.overall_passed // .overall_pass // true) then "pass" else "fail" end' "$GATE_REPORT")"
+    if jq -e '.failures | type == "array"' "$GATE_REPORT" >/dev/null 2>&1; then
+      FAILURES_JSON="$(jq -c '.failures' "$GATE_REPORT")"
+    fi
+  else
+    GATE_RESULTS_JSON="$(jq -c '
+      [
+        (if has("coverage") then {gate_id:"coverage",name:"coverage",status:(if .coverage.passed then "pass" else "fail" end),duration_ms:0} else empty end),
+        (if has("flake") then {gate_id:"flake",name:"flake",status:(if .flake.passed then "pass" else "fail" end),duration_ms:0} else empty end),
+        (if has("runtime") then {gate_id:"runtime",name:"runtime",status:(if .runtime.passed then "pass" else "fail" end),duration_ms:0} else empty end),
+        (if has("crash") then {gate_id:"crash",name:"crash",status:(if .crash.passed then "pass" else "fail" end),duration_ms:0} else empty end),
+        (if has("perf") then {gate_id:"perf",name:"perf",status:(if .perf.passed then "pass" else "fail" end),duration_ms:0} else empty end)
+      ]' "$GATE_REPORT")"
+    OVERALL="$(jq -r 'if (.overall_passed // .overall_pass // true) then "pass" else "fail" end' "$GATE_REPORT")"
+  fi
 fi
 
-# ---- Count test results from test log files ----
-if [[ -d "$ROOT_DIR/artifacts/testing/logs" ]]; then
-  while IFS= read -r -d '' logfile; do
-    result=$(python3 -c "import json; print(json.load(open('$logfile'))['result'])" 2>/dev/null || echo "unknown")
-    TOTAL_TESTS=$((TOTAL_TESTS + 1))
-    case "$result" in
-      pass) PASSED=$((PASSED + 1)) ;;
-      fail)
-        FAILED=$((FAILED + 1))
-        OVERALL="fail"
-        # Extract failure diagnostic
-        diag=$(python3 -c "
-import json, os, time
-with open('$logfile') as f:
-    data = json.load(f)
-rel = os.path.relpath('$logfile', '$ROOT_DIR')
-print(json.dumps({
-    'schema_version': 'frankenjax.failure-diagnostic.v1',
-    'gate': 'G2',
-    'test': data.get('test_id', 'unknown'),
-    'status': 'fail',
-    'summary': (data.get('details') or 'test failed')[:200],
-    'detail_path': rel,
-    'replay_cmd': 'cargo test -- ' + data.get('test_id', '').split('::')[-1] + ' --nocapture',
-    'related_fixtures': [],
-    'timestamp_unix_ms': data.get('env', {}).get('timestamp_unix_ms', int(time.time()*1000))
-}))
-" 2>/dev/null || echo "")
-        if [[ -n "$diag" ]]; then
-          FAILURES+=("$diag")
-        fi
-        ;;
-      skip) SKIPPED=$((SKIPPED + 1)) ;;
-    esac
-  done < <(find "$ROOT_DIR/artifacts/testing/logs" -name "*.json" -type f -print0 2>/dev/null)
+mapfile -t failure_files < <(
+  {
+    [[ -d "$CI_RUN_DIR" ]] && find "$CI_RUN_DIR" -name 'failure_diagnostic.v1.json' -type f
+    [[ -d "$OUTPUT_DIR" ]] && find "$OUTPUT_DIR" -name 'failure_diagnostic.v1.json' -type f
+  } 2>/dev/null | sort -u
+)
+
+if (( ${#failure_files[@]} > 0 )); then
+  FAILURES_JSON="$(jq -s '.' "${failure_files[@]}")"
 fi
 
-# ---- Also check e2e logs for failures ----
-for e2e_log in "$ROOT_DIR"/artifacts/e2e/*.e2e.json; do
-  [[ -f "$e2e_log" ]] || continue
-  result=$(python3 -c "import json; print(json.load(open('$e2e_log')).get('result','pass'))" 2>/dev/null || echo "pass")
-  TOTAL_TESTS=$((TOTAL_TESTS + 1))
-  if [[ "$result" == "pass" ]]; then
-    PASSED=$((PASSED + 1))
-  else
-    FAILED=$((FAILED + 1))
-    OVERALL="fail"
-  fi
-done
+TOTAL_TESTS="$(printf '%s\n' "$GATE_RESULTS_JSON" | jq 'length')"
+PASSED="$(printf '%s\n' "$GATE_RESULTS_JSON" | jq '[.[] | select(.status == "pass")] | length')"
+FAILED="$(printf '%s\n' "$GATE_RESULTS_JSON" | jq '[.[] | select(.status == "fail")] | length')"
+SKIPPED="$(printf '%s\n' "$GATE_RESULTS_JSON" | jq '[.[] | select(.status == "skipped")] | length')"
 
-# ---- Also check golden journey logs ----
-for gj_log in "$ROOT_DIR"/artifacts/e2e/golden_journeys/*.golden.json; do
-  [[ -f "$gj_log" ]] || continue
-  result=$(python3 -c "import json; print(json.load(open('$gj_log')).get('result','pass'))" 2>/dev/null || echo "pass")
-  TOTAL_TESTS=$((TOTAL_TESTS + 1))
-  if [[ "$result" == "pass" ]]; then
-    PASSED=$((PASSED + 1))
-  else
-    FAILED=$((FAILED + 1))
-    OVERALL="fail"
-  fi
-done
+if [[ "$TOTAL_TESTS" -eq 0 ]]; then
+  FAILED="$(printf '%s\n' "$FAILURES_JSON" | jq 'length')"
+  TOTAL_TESTS="$FAILED"
+  PASSED=0
+  SKIPPED=0
+fi
 
-FINISHED_AT=$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')
+if [[ "$FAILED" -gt 0 ]]; then
+  OVERALL="fail"
+fi
+
+FINISHED_AT="$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')"
 DURATION=$((FINISHED_AT - STARTED_AT))
 
-# ---- Build manifest JSON ----
-GATE_RESULTS_JSON="[]"
-if [[ ${#GATE_RESULTS[@]} -gt 0 ]]; then
-  GATE_RESULTS_JSON=$(printf '%s\n' "${GATE_RESULTS[@]}" | python3 -c "import json,sys; print(json.dumps([json.loads(l) for l in sys.stdin]))")
+ARTIFACT_INDEX_JSON='[]'
+if (( ${#ARTIFACT_INDEX[@]} > 0 )); then
+  ARTIFACT_INDEX_JSON="$(printf '%s\n' "${ARTIFACT_INDEX[@]}" | jq -s '.')"
 fi
 
-FAILURES_JSON="[]"
-if [[ ${#FAILURES[@]} -gt 0 ]]; then
-  FAILURES_JSON=$(printf '%s\n' "${FAILURES[@]}" | python3 -c "import json,sys; print(json.dumps([json.loads(l) for l in sys.stdin]))")
-fi
-
-ARTIFACT_INDEX_JSON="[]"
-if [[ ${#ARTIFACT_INDEX[@]} -gt 0 ]]; then
-  ARTIFACT_INDEX_JSON=$(printf '%s\n' "${ARTIFACT_INDEX[@]}" | python3 -c "import json,sys; print(json.dumps([json.loads(l) for l in sys.stdin]))")
-fi
-
-python3 -c "
-import json
-
-manifest = {
-    'schema_version': 'frankenjax.run-manifest.v1',
-    'run_id': '$RUN_ID',
-    'started_at_unix_ms': $STARTED_AT,
-    'finished_at_unix_ms': $FINISHED_AT,
-    'total_duration_ms': $DURATION,
-    'summary': {
-        'total_tests': $TOTAL_TESTS,
-        'passed': $PASSED,
-        'failed': $FAILED,
-        'skipped': $SKIPPED,
-        'flaky': 0,
-        'overall_status': '$OVERALL'
+jq -n \
+  --arg schema_version "frankenjax.run-manifest.v1" \
+  --arg run_id "$RUN_ID" \
+  --argjson started_at_unix_ms "$STARTED_AT" \
+  --argjson finished_at_unix_ms "$FINISHED_AT" \
+  --argjson total_duration_ms "$DURATION" \
+  --argjson total_tests "$TOTAL_TESTS" \
+  --argjson passed "$PASSED" \
+  --argjson failed "$FAILED" \
+  --argjson skipped "$SKIPPED" \
+  --arg overall_status "$OVERALL" \
+  --argjson gate_results "$GATE_RESULTS_JSON" \
+  --argjson failures "$FAILURES_JSON" \
+  --argjson artifact_index "$ARTIFACT_INDEX_JSON" \
+  --arg rust_version "$RUST_VERSION" \
+  --arg os "$OS_INFO" \
+  --arg git_sha "$GIT_SHA_FULL" \
+  --arg git_branch "$GIT_BRANCH" \
+  '{
+    schema_version: $schema_version,
+    run_id: $run_id,
+    started_at_unix_ms: $started_at_unix_ms,
+    finished_at_unix_ms: $finished_at_unix_ms,
+    total_duration_ms: $total_duration_ms,
+    summary: {
+      total_tests: $total_tests,
+      passed: $passed,
+      failed: $failed,
+      skipped: $skipped,
+      flaky: 0,
+      overall_status: $overall_status
     },
-    'gate_results': json.loads('''$GATE_RESULTS_JSON'''),
-    'failures': json.loads('''$FAILURES_JSON'''),
-    'artifact_index': json.loads('''$ARTIFACT_INDEX_JSON'''),
-    'env': {
-        'rust_version': '''$RUST_VERSION''',
-        'os': '''$OS_INFO''',
-        'git_sha': '$GIT_SHA_FULL',
-        'git_branch': '$GIT_BRANCH'
+    gate_results: $gate_results,
+    failures: $failures,
+    artifact_index: $artifact_index,
+    env: {
+      rust_version: $rust_version,
+      os: $os,
+      git_sha: $git_sha,
+      git_branch: $git_branch
     }
-}
-
-print(json.dumps(manifest, indent=2))
-" > "$OUTPUT_DIR/manifest.json"
+  }' >"$OUTPUT_DIR/manifest.json"
 
 echo "[manifest] wrote $OUTPUT_DIR/manifest.json ($ARTIFACT_COUNT artifacts indexed)"
 
-# ---- Generate human-readable summary ----
-cat > "$OUTPUT_DIR/summary.txt" <<SUMMARY
+cat >"$OUTPUT_DIR/summary.txt" <<SUMMARY
 ============================================================
   FrankenJAX CI Run Summary
   Run ID:   $RUN_ID
@@ -252,35 +241,23 @@ Artifacts: $ARTIFACT_COUNT indexed
 
 SUMMARY
 
-if [[ ${#GATE_RESULTS[@]} -gt 0 ]]; then
-  echo "Gate Results:" >> "$OUTPUT_DIR/summary.txt"
-  for gate_json in "${GATE_RESULTS[@]}"; do
-    gid=$(echo "$gate_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['gate_id'])" 2>/dev/null)
-    gstatus=$(echo "$gate_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['status'])" 2>/dev/null)
-    printf "  %-12s %s\n" "$gid" "$gstatus" >> "$OUTPUT_DIR/summary.txt"
-  done
-  echo "" >> "$OUTPUT_DIR/summary.txt"
+if [[ "$(printf '%s\n' "$GATE_RESULTS_JSON" | jq 'length')" -gt 0 ]]; then
+  echo "Gate Results:" >>"$OUTPUT_DIR/summary.txt"
+  printf '%s\n' "$GATE_RESULTS_JSON" | jq -r '.[] | "  \(.gate_id)\t\(.status)"' >>"$OUTPUT_DIR/summary.txt"
+  echo "" >>"$OUTPUT_DIR/summary.txt"
 fi
 
-if [[ $FAILED -gt 0 ]]; then
-  echo "FAILURES:" >> "$OUTPUT_DIR/summary.txt"
-  echo "------------------------------------------------------------" >> "$OUTPUT_DIR/summary.txt"
-  for fail_json in "${FAILURES[@]}"; do
-    test_name=$(echo "$fail_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['test'])" 2>/dev/null)
-    summary_text=$(echo "$fail_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary'])" 2>/dev/null)
-    replay=$(echo "$fail_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['replay_cmd'])" 2>/dev/null)
-    echo "  TEST:   $test_name" >> "$OUTPUT_DIR/summary.txt"
-    echo "  REASON: $summary_text" >> "$OUTPUT_DIR/summary.txt"
-    echo "  REPLAY: $replay" >> "$OUTPUT_DIR/summary.txt"
-    echo "" >> "$OUTPUT_DIR/summary.txt"
-  done
+if [[ "$FAILED" -gt 0 ]]; then
+  echo "FAILURES:" >>"$OUTPUT_DIR/summary.txt"
+  echo "------------------------------------------------------------" >>"$OUTPUT_DIR/summary.txt"
+  printf '%s\n' "$FAILURES_JSON" | jq -r '.[] | "  TEST:   \(.test)\n  REASON: \(.summary)\n  REPLAY: \(.replay_cmd)\n"' >>"$OUTPUT_DIR/summary.txt"
 else
-  echo "No failures detected." >> "$OUTPUT_DIR/summary.txt"
+  echo "No failures detected." >>"$OUTPUT_DIR/summary.txt"
 fi
 
-echo "------------------------------------------------------------" >> "$OUTPUT_DIR/summary.txt"
-echo "Manifest: $OUTPUT_DIR/manifest.json" >> "$OUTPUT_DIR/summary.txt"
-echo "Artifacts dir: $ROOT_DIR/artifacts/" >> "$OUTPUT_DIR/summary.txt"
+echo "------------------------------------------------------------" >>"$OUTPUT_DIR/summary.txt"
+echo "Manifest: $OUTPUT_DIR/manifest.json" >>"$OUTPUT_DIR/summary.txt"
+echo "Artifacts dir: $ROOT_DIR/artifacts/" >>"$OUTPUT_DIR/summary.txt"
 
 echo "[manifest] wrote $OUTPUT_DIR/summary.txt"
 cat "$OUTPUT_DIR/summary.txt"

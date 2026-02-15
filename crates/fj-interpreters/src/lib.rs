@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+pub mod partial_eval;
+pub mod staging;
+
 use fj_core::{Atom, Jaxpr, Value, VarId};
 use fj_lax::{EvalError, eval_primitive};
 use rustc_hash::FxHashMap;

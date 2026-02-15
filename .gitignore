@@ -40,3 +40,16 @@ references/
 
 # Original PNG (converted to webp)
 *.png
+
+# Ephemeral agent/runtime artifacts
+storage.sqlite3
+storage.sqlite3-*
+rustc-ice-*.txt
+a.out
+perf.data
+perf.data.*
+--graph-format.svg
+
+# Codex build artifacts
+target-codex*/
+target_*/

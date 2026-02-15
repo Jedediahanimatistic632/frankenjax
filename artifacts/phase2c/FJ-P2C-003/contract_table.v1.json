@@ -1,0 +1,436 @@
+{
+  "schema_version": "frankenjax.contract-table.v1",
+  "packet_id": "FJ-P2C-003",
+  "generated_at_unix_ms": 1771114800000,
+  "mode_matrix": [
+    {
+      "mode": "strict",
+      "contract_rows": [
+        {
+          "row_id": "p2c003.strict.inv001",
+          "title": "Partial eval semantic equivalence",
+          "preconditions": [
+            "Valid closed Jaxpr with well-typed inputs",
+            "Boolean mask indicating known/unknown inputs"
+          ],
+          "guarantees": [
+            "eval(jaxpr_known, known_inputs) produces residuals",
+            "eval(jaxpr_unknown, residuals ++ unknown_inputs) equals eval(original_jaxpr, all_inputs)",
+            "Semantic equivalence holds for all valid input values",
+            "legacy_anchor=jax/jax/_src/interpreters/partial_eval.py:858"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "pe_semantic_mismatch"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "jaxpr_fingerprint",
+              "unknowns_mask"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c003.strict.inv002",
+          "title": "Known jaxpr contains no unknown-input equations",
+          "preconditions": [
+            "Partial evaluation has produced jaxpr_known"
+          ],
+          "guarantees": [
+            "Every equation in jaxpr_known has all inputs derivable from known inputs or prior known-equation outputs",
+            "No equation with any unknown-dependent input appears in jaxpr_known",
+            "legacy_anchor=jax/jax/_src/interpreters/partial_eval.py:573"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "pe_known_jaxpr_contains_unknown_dep"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "equation_index",
+              "unknown_input_var"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c003.strict.inv003",
+          "title": "Residual type alignment between known and unknown jaxprs",
+          "preconditions": [
+            "Partial evaluation has produced jaxpr_known and jaxpr_unknown"
+          ],
+          "guarantees": [
+            "Residual outputs of jaxpr_known match leading inputs of jaxpr_unknown in count",
+            "Each residual abstract value (shape, dtype) matches between producer and consumer",
+            "legacy_anchor=jax/jax/_src/interpreters/partial_eval.py:858"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "pe_residual_type_mismatch"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "residual_count",
+              "expected_types",
+              "actual_types"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c003.strict.inv004",
+          "title": "Constants hoisted exactly once",
+          "preconditions": [
+            "Tracing produces constants via new_const or constvar hoisting"
+          ],
+          "guarantees": [
+            "Each constant value appears at most once in constvars (deduplication by identity)",
+            "Constants are evaluated/materialized exactly once during known-jaxpr execution",
+            "legacy_anchor=jax/jax/_src/interpreters/partial_eval.py:2007"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "pe_constant_duplication"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "const_count",
+              "duplicate_ids"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c003.strict.inv005",
+          "title": "Equation ordering preservation in residual Jaxpr",
+          "preconditions": [
+            "Original Jaxpr has topologically ordered equations"
+          ],
+          "guarantees": [
+            "Residual (unknown) Jaxpr preserves topological ordering from original",
+            "All input dependencies are satisfied before each equation executes",
+            "legacy_anchor=jax/jax/_src/interpreters/partial_eval.py:716"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "pe_equation_order_violation"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "out_of_order_eqn_index"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c003.strict.inv006",
+          "title": "make_jaxpr produces valid closed Jaxpr with correct types",
+          "preconditions": [
+            "Callable function and example arguments provided",
+            "Function returns valid JAX types"
+          ],
+          "guarantees": [
+            "Returned ClosedJaxpr has input types matching argument abstract values",
+            "Output types match function return value abstract values",
+            "Jaxpr passes well-formedness checks (check_jaxpr)",
+            "legacy_anchor=jax/jax/_src/api.py:2471"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "make_jaxpr_type_mismatch"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "in_types",
+              "out_types"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c003.strict.inv007",
+          "title": "DCE preserves effectful equations",
+          "preconditions": [
+            "Jaxpr contains equations with side effects",
+            "DCE pass applied with some outputs marked unused"
+          ],
+          "guarantees": [
+            "Equations with non-dceable effects are never eliminated",
+            "Only equations with no effects or dceable effects can be removed",
+            "legacy_anchor=jax/jax/_src/interpreters/partial_eval.py:1411"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "dce_removed_effectful_eqn"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "removed_eqn_primitive",
+              "effects"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c003.strict.inv008",
+          "title": "Tracer leak detection before Jaxpr finalization",
+          "preconditions": [
+            "Tracing context is active"
+          ],
+          "guarantees": [
+            "ensure_no_leaks fires before Jaxpr is returned from tracing",
+            "Escaped tracers result in immediate error with provenance info",
+            "legacy_anchor=jax/jax/_src/interpreters/partial_eval.py:2480"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "tracer_leaked"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "tracer_id",
+              "trace_context"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        }
+      ]
+    },
+    {
+      "mode": "hardened",
+      "contract_rows": [
+        {
+          "row_id": "p2c003.hardened.inv009",
+          "title": "Partially-known tensor fallback to fully unknown",
+          "preconditions": [
+            "Tensor value has some elements known and others unknown"
+          ],
+          "guarantees": [
+            "Entire tensor is treated as unknown for partial evaluation",
+            "Audit log entry records the fallback decision",
+            "No partial tensor splitting is attempted"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_partial_tensor_fallback"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "tensor_shape",
+              "known_element_count"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c003.hardened.inv010",
+          "title": "Recursive JIT collapse to single staging pass",
+          "preconditions": [
+            "jit-inside-jit detected during tracing"
+          ],
+          "guarantees": [
+            "Nested jit is collapsed to a single staging pass",
+            "Deduplication logged with inner/outer trace context",
+            "Semantics preserved: inner jit becomes identity"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_recursive_jit_collapse"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "nesting_depth",
+              "collapsed_traces"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c003.hardened.inv011",
+          "title": "Staging timeout with full-eval fallback",
+          "preconditions": [
+            "Single partial evaluation pass exceeds 5 second timeout"
+          ],
+          "guarantees": [
+            "Partial eval is aborted and program falls back to full eval mode",
+            "Timeout event logged with elapsed time and jaxpr size",
+            "No partial results are leaked"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_staging_timeout"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "elapsed_ms",
+              "eqn_count"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c003.hardened.inv012",
+          "title": "Malformed PartialVal handling",
+          "preconditions": [
+            "PartialVal violates XOR invariant (both known and unknown, or neither)"
+          ],
+          "guarantees": [
+            "Malformed PartialVal is rejected with deterministic error",
+            "Repair path defaults to treating value as unknown",
+            "Audit entry emitted with original malformed state"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_malformed_partial_val"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "partial_val_state"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        }
+      ]
+    }
+  ],
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "allowlisted_repair"
+  },
+  "invariants": [
+    {
+      "invariant_id": "p2c003.strict.inv001",
+      "statement": "Partial evaluation of a Jaxpr split into known and unknown sub-Jaxprs is semantically equivalent to evaluating the original Jaxpr.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json",
+        "crates/fj-interpreters/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.strict.inv002",
+      "statement": "The known sub-Jaxpr contains only equations whose inputs are all derivable from known values.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.strict.inv003",
+      "statement": "Residual abstract values produced by jaxpr_known exactly match the leading input types of jaxpr_unknown.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.strict.inv004",
+      "statement": "Constants are hoisted and deduplicated by identity, appearing exactly once in constvars.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.strict.inv005",
+      "statement": "Equation ordering in the residual Jaxpr preserves the topological order from the original Jaxpr.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.strict.inv006",
+      "statement": "make_jaxpr produces a well-formed ClosedJaxpr whose input/output types match the provided arguments and function return.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.strict.inv007",
+      "statement": "Dead code elimination never removes equations with non-dceable side effects.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.strict.inv008",
+      "statement": "Tracer leak detection fires before any Jaxpr is returned from a tracing context.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.hardened.inv009",
+      "statement": "Partially-known tensors are treated as fully unknown under hardened mode with audit logging.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.hardened.inv010",
+      "statement": "Recursive JIT nesting is collapsed to a single staging pass under hardened mode.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.hardened.inv011",
+      "statement": "Staging timeouts result in a safe fallback to full evaluation with no partial state leakage.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c003.hardened.inv012",
+      "statement": "Malformed PartialVal states are rejected and repaired to unknown with audit logging.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-003/legacy_anchor_map.v1.json"
+      ]
+    }
+  ]
+}

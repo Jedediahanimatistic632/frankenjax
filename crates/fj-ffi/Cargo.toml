@@ -11,3 +11,8 @@ fj-core = { path = "../fj-core" }
 [dev-dependencies]
 fj-test-utils = { path = "../fj-test-utils" }
 proptest = { workspace = true }
+criterion = "0.8"
+
+[[bench]]
+name = "ffi_baseline"
+harness = false

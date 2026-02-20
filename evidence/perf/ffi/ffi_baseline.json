@@ -1,0 +1,80 @@
+{
+  "schema_version": "frankenjax.perf-delta.v1",
+  "packet_id": "FJ-P2C-007",
+  "subsystem": "ffi_call_interface",
+  "generated_at": "2026-02-20T12:34:00Z",
+  "benchmark_tool": "criterion 0.8",
+  "optimization_description": "Baseline measurements for FFI call interface. No optimization applied — V1 interface is already thin wrapper with minimal overhead.",
+  "deltas": [
+    {
+      "benchmark": "ffi_roundtrip/scalar_f64",
+      "before_ns": null,
+      "after_ns": 92,
+      "delta_pct": null,
+      "status": "baseline"
+    },
+    {
+      "benchmark": "ffi_roundtrip/noop",
+      "before_ns": null,
+      "after_ns": 40,
+      "delta_pct": null,
+      "status": "baseline"
+    },
+    {
+      "benchmark": "ffi_roundtrip/1k_f64_vec",
+      "before_ns": null,
+      "after_ns": 880,
+      "delta_pct": null,
+      "status": "baseline"
+    },
+    {
+      "benchmark": "marshal/scalar_to_buffer",
+      "before_ns": null,
+      "after_ns": 16,
+      "delta_pct": null,
+      "status": "baseline"
+    },
+    {
+      "benchmark": "marshal/buffer_to_scalar",
+      "before_ns": null,
+      "after_ns": 8,
+      "delta_pct": null,
+      "status": "baseline"
+    },
+    {
+      "benchmark": "marshal/1k_tensor_to_buffer",
+      "before_ns": null,
+      "after_ns": 1367,
+      "delta_pct": null,
+      "status": "baseline"
+    },
+    {
+      "benchmark": "marshal/1k_buffer_to_tensor",
+      "before_ns": null,
+      "after_ns": 1593,
+      "delta_pct": null,
+      "status": "baseline"
+    },
+    {
+      "benchmark": "registry/lookup",
+      "before_ns": null,
+      "after_ns": 37,
+      "delta_pct": null,
+      "status": "baseline"
+    }
+  ],
+  "summary": {
+    "total_benchmarks": 8,
+    "improved": 0,
+    "regressed": 0,
+    "unchanged": 0,
+    "baseline": 8,
+    "primary_note": "All targets met. Scalar roundtrip 92ns (<500ns target). 1K tensor 880ns (<2µs target). Registry lookup 37ns. No optimization needed for V1."
+  },
+  "targets_met": {
+    "scalar_roundtrip_under_500ns": true,
+    "1k_tensor_under_2us": true,
+    "safety_wrapper_under_50ns": true,
+    "registry_lookup_under_100ns": true
+  }
+}

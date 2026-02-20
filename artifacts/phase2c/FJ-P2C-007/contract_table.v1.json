@@ -1,0 +1,463 @@
+{
+  "schema_version": "frankenjax.contract-table.v1",
+  "packet_id": "FJ-P2C-007",
+  "generated_at_unix_ms": 1771589940000,
+  "mode_matrix": [
+    {
+      "mode": "strict",
+      "contract_rows": [
+        {
+          "row_id": "p2c007.strict.inv001",
+          "title": "FFI calls only through registered FfiRegistry interface",
+          "preconditions": [
+            "FfiRegistry has been initialized",
+            "Target name string has been registered via register(name, fn_ptr)"
+          ],
+          "guarantees": [
+            "FFI calls are dispatched exclusively through FfiRegistry.call(name, inputs, outputs)",
+            "Direct extern 'C' fn invocations are confined to FfiCall::invoke() unsafe block",
+            "No FFI call can bypass the registry validation layer",
+            "legacy_anchor=P2C007-A03 (register_ffi_target: global registration), P2C007-A01 (custom_call: dispatch mechanism)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "ffi_unregistered_target"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "target_name",
+              "error_detail"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c007.strict.inv002",
+          "title": "Buffer layout matches declared dtype and shape exactly at FFI boundary",
+          "preconditions": [
+            "FfiBuffer has been constructed from a TensorValue or allocated for output",
+            "dtype and shape have been declared in the FfiCall equation"
+          ],
+          "guarantees": [
+            "FfiBuffer.data length == product(shape) * dtype.size_bytes()",
+            "Input buffers are contiguous row-major layout with no padding",
+            "dtype.size_bytes() matches C ABI size: F64→8 (c_double), I64→8 (c_longlong)",
+            "Shape dimensions are passed as &[usize] matching the declared abstract shape",
+            "legacy_anchor=P2C007-A15 (buffer_protocol: pointer+shape+dtype triples), P2C007-A11 (ffi_type_mapping)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "ffi_buffer_layout_mismatch"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "declared_dtype",
+              "declared_shape",
+              "actual_buffer_size",
+              "expected_buffer_size"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c007.strict.inv003",
+          "title": "FFI error propagates as clean Rust error, never undefined behavior",
+          "preconditions": [
+            "FFI function returns non-zero status code",
+            "Or FFI function writes to error message buffer"
+          ],
+          "guarantees": [
+            "Non-zero return code mapped to FfiError::CallFailed { target, code, message }",
+            "Error message extracted from thread-local or callback-set buffer",
+            "No UB on error path: output buffers contain indeterminate-but-valid bytes (zeroed pre-allocation)",
+            "FfiError variants are exhaustive: CallFailed, TargetNotFound, BufferMismatch, NullPointer",
+            "legacy_anchor=P2C007-A14 (ffi_error_handling: return code protocol)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "ffi_call_failed"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "target_name",
+              "return_code",
+              "error_message"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c007.strict.inv004",
+          "title": "No dangling pointers after FFI call returns",
+          "preconditions": [
+            "FFI call has been invoked via FfiCall::invoke()",
+            "Input and output FfiBuffers were lent to the external function"
+          ],
+          "guarantees": [
+            "Input buffer borrows (&[u8]) are scoped to the FFI call duration",
+            "Output buffer borrows (&mut [u8]) are scoped to the FFI call duration",
+            "FfiBuffer::as_ptr() and FfiBuffer::as_mut_ptr() are only valid within the unsafe block",
+            "After invoke() returns, no raw pointers to buffer data remain accessible to external code",
+            "legacy_anchor=P2C007-A16 (memory_ownership: borrow semantics), P2C007-A15 (buffer_protocol)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "ffi_dangling_pointer"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "target_name",
+              "buffer_count"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c007.strict.inv005",
+          "title": "Memory ownership is one-way: FrankenJAX owns all buffers",
+          "preconditions": [
+            "FFI call is in progress",
+            "Input and output buffers have been passed to external function"
+          ],
+          "guarantees": [
+            "FrankenJAX allocates and owns all input and output buffers",
+            "FFI function receives borrows: *const u8 (input), *mut u8 (output)",
+            "FFI function must not free, resize, or retain references to any buffer",
+            "Buffer deallocation happens only after FfiCall::invoke() returns",
+            "legacy_anchor=P2C007-A16 (memory_ownership), P2C007-A15 (buffer_protocol: memory owned by JAX)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "ffi_ownership_violation"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "target_name"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c007.strict.inv006",
+          "title": "FFI registration is unique per target name",
+          "preconditions": [
+            "FfiRegistry exists",
+            "register(name, fn_ptr) is called"
+          ],
+          "guarantees": [
+            "First registration for a given name succeeds",
+            "Duplicate registration for the same name returns FfiError::DuplicateTarget",
+            "Registration is thread-safe (interior synchronization via RwLock)",
+            "Registered targets persist for the process lifetime (no deregistration in V1)",
+            "legacy_anchor=P2C007-A03 (register_ffi_target: duplicate raises ValueError)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "ffi_duplicate_registration"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "target_name"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c007.strict.inv007",
+          "title": "FFI calls are opaque to transforms in V1",
+          "preconditions": [
+            "A transform (grad, vmap) encounters an FfiCall equation"
+          ],
+          "guarantees": [
+            "grad over FfiCall raises TransformExecutionError (not differentiable)",
+            "vmap over FfiCall raises TransformExecutionError (not vectorizable)",
+            "No silent fallback or approximation for unsupported transforms",
+            "legacy_anchor=P2C007-A17 (ffi_vmap_rule: V1 not vmap-compatible), P2C007-A18 (custom_call_grad_rule: no default gradient)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "ffi_unsupported_transform"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "target_name",
+              "transform_kind"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c007.strict.inv008",
+          "title": "Unsafe code is confined to a single audited invoke() method",
+          "preconditions": [
+            "FfiCall module exists in the crate"
+          ],
+          "guarantees": [
+            "Only FfiCall::invoke() contains unsafe blocks",
+            "The unsafe block has documented SAFETY comments listing preconditions",
+            "No other function in the FFI module uses unsafe",
+            "Crate-level #![forbid(unsafe_code)] is replaced by #![deny(unsafe_code)] with explicit #[allow(unsafe_code)] on invoke()",
+            "legacy_anchor=P2C007-A04 (pycapsule_new: FrankenJAX uses typed fn ptrs directly)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "ffi_unsafe_code_escape"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        }
+      ]
+    },
+    {
+      "mode": "hardened",
+      "contract_rows": [
+        {
+          "row_id": "p2c007.hardened.inv009",
+          "title": "Unregistered FFI target returns error with target name in message",
+          "preconditions": [
+            "mode == Hardened",
+            "FfiCall equation references a target_name not in FfiRegistry"
+          ],
+          "guarantees": [
+            "Returns FfiError::TargetNotFound { name } with the exact target name",
+            "Error message is actionable: includes the attempted target name and list of registered targets",
+            "No panic, no UB, no silent fallback",
+            "Evidence ledger records 'ffi_target_not_found' signal",
+            "legacy_anchor=P2C007-A03 (register_ffi_target: duplicate raises error with name)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "hardened_ffi_target_not_found"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "target_name",
+              "registered_targets"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c007.hardened.inv010",
+          "title": "Buffer size mismatch detected and rejected before FFI call",
+          "preconditions": [
+            "mode == Hardened",
+            "Input or output buffer size does not match declared dtype * shape"
+          ],
+          "guarantees": [
+            "Pre-call validation compares actual buffer bytes vs expected (product(shape) * dtype.size_bytes())",
+            "Mismatch returns FfiError::BufferMismatch { expected, actual, buffer_index }",
+            "No FFI call is made if pre-validation fails (fail-before-call)",
+            "Evidence ledger records 'ffi_buffer_mismatch' signal",
+            "legacy_anchor=P2C007-A09 (ffi_lowering_rule: validates input/output layouts)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "hardened_ffi_buffer_mismatch"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "target_name",
+              "buffer_index",
+              "expected_bytes",
+              "actual_bytes"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c007.hardened.inv011",
+          "title": "IO callbacks thread through EffectContext for ordering",
+          "preconditions": [
+            "mode == Hardened",
+            "IO callback is registered and invoked during eval_jaxpr"
+          ],
+          "guarantees": [
+            "IO callback receives current effect token from EffectContext",
+            "IO callback returns new effect token after execution",
+            "Effect tokens enforce sequential execution order for side-effecting callbacks",
+            "Pure callbacks do not require effect tokens",
+            "legacy_anchor=P2C007-A06 (io_callback: ordered_effects), P2C007-A13 (callback_effect_handler)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "hardened_callback_effect_ordering_violation"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "callback_name",
+              "effect_token"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c007.hardened.inv012",
+          "title": "Null function pointer rejected at registration time",
+          "preconditions": [
+            "mode == Hardened",
+            "register(name, fn_ptr) called with null pointer"
+          ],
+          "guarantees": [
+            "Null pointer detected at registration time (not at call time)",
+            "Returns FfiError::NullPointer { target_name }",
+            "No entry added to registry for null pointers",
+            "Evidence ledger records 'ffi_null_pointer_registration' signal",
+            "legacy_anchor=P2C007-A04 (pycapsule_new: capsule wraps C function pointer)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "hardened_ffi_null_pointer"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "target_name"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        }
+      ]
+    }
+  ],
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "fail_closed"
+  },
+  "invariants": [
+    {
+      "invariant_id": "p2c007.strict.inv001",
+      "statement": "FFI calls are dispatched exclusively through FfiRegistry; no bypass paths exist.",
+      "proof_artifact_refs": [
+        "FfiRegistry.call() is the only public API for invoking FFI targets",
+        "FfiCall::invoke() is pub(crate) — not accessible outside the FFI module"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.strict.inv002",
+      "statement": "Buffer layout at FFI boundary exactly matches declared dtype/shape with no padding.",
+      "proof_artifact_refs": [
+        "FfiBuffer::new() validates: data.len() == product(shape) * dtype.size_bytes()",
+        "Row-major layout is the only supported memory order in V1"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.strict.inv003",
+      "statement": "FFI errors propagate as structured FfiError variants, never UB.",
+      "proof_artifact_refs": [
+        "FfiCall::invoke() checks return code and maps non-zero to FfiError::CallFailed",
+        "Output buffers are pre-zeroed before FFI call (no uninitialized reads on error path)"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.strict.inv004",
+      "statement": "No raw pointers to buffer data escape the FFI call scope.",
+      "proof_artifact_refs": [
+        "FfiBuffer borrows are stack-local within the unsafe block of invoke()",
+        "Rust borrow checker enforces lifetime constraints on safe side"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.strict.inv005",
+      "statement": "FrankenJAX owns all buffers; FFI functions only borrow them.",
+      "proof_artifact_refs": [
+        "Input: *const u8 (read-only), Output: *mut u8 (write-only)",
+        "Buffer deallocation occurs in Drop impl after invoke() returns"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.strict.inv006",
+      "statement": "Target names are unique in the registry; duplicates are rejected.",
+      "proof_artifact_refs": [
+        "FfiRegistry uses HashMap<String, FfiTarget>; insert checks for existing key",
+        "Thread safety via RwLock (read-many, write-exclusive)"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.strict.inv007",
+      "statement": "FFI calls are opaque to grad and vmap transforms in V1.",
+      "proof_artifact_refs": [
+        "FfiCall has no registered JVP/VJP rule",
+        "FfiCall has no registered batching rule",
+        "Transform interpreter raises TransformExecutionError on encounter"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.strict.inv008",
+      "statement": "All unsafe code is confined to FfiCall::invoke() with documented SAFETY contracts.",
+      "proof_artifact_refs": [
+        "#![deny(unsafe_code)] at crate level with explicit #[allow(unsafe_code)] on invoke()",
+        "SAFETY comments list: non-null fn_ptr, valid buffer lengths, caller owns buffers"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.hardened.inv009",
+      "statement": "Unregistered FFI target returns actionable error with target name.",
+      "proof_artifact_refs": [
+        "FfiRegistry.call() returns TargetNotFound with name and available list"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.hardened.inv010",
+      "statement": "Buffer size pre-validation rejects mismatches before FFI call is made.",
+      "proof_artifact_refs": [
+        "FfiCall::invoke() validates all buffer sizes before entering unsafe block",
+        "Fail-before-call pattern: no external code executed if validation fails"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.hardened.inv011",
+      "statement": "IO callbacks are ordered via EffectContext effect tokens.",
+      "proof_artifact_refs": [
+        "EffectContext.thread_token() provides sequential ordering",
+        "IO callbacks receive and return effect tokens"
+      ]
+    },
+    {
+      "invariant_id": "p2c007.hardened.inv012",
+      "statement": "Null function pointers are rejected at registration time, not at call time.",
+      "proof_artifact_refs": [
+        "FfiRegistry.register() checks fn_ptr.is_null() before insertion",
+        "Early rejection prevents latent null-deref bugs"
+      ]
+    }
+  ]
+}

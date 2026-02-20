@@ -7,8 +7,8 @@
 //! Legacy anchor: P2C006-A12 (Client), P2C006-A07 (backend_specific_translations).
 
 use crate::buffer::Buffer;
-use crate::device::{DeviceId, DeviceInfo};
-use fj_core::{Jaxpr, Value};
+use crate::device::{DeviceId, DeviceInfo, DevicePlacement};
+use fj_core::{DType, Jaxpr, Value};
 
 // ── Backend Errors ─────────────────────────────────────────────────
 
@@ -96,6 +96,128 @@ pub trait Backend: Send + Sync {
     /// Platform version string for cache key inclusion.
     /// Legacy anchor: P2C006-A20 (backend_xla_version).
     fn version(&self) -> &str;
+
+    /// Query backend capabilities (supported dtypes, tensor rank limits, memory).
+    fn capabilities(&self) -> BackendCapabilities;
+}
+
+// ── Backend Capabilities ───────────────────────────────────────────
+
+/// Describes what a backend supports: dtypes, rank limits, memory budget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackendCapabilities {
+    /// Set of supported element dtypes.
+    pub supported_dtypes: Vec<DType>,
+    /// Maximum tensor rank supported (0 = scalars only).
+    pub max_tensor_rank: usize,
+    /// Approximate memory budget in bytes (None = unlimited / unknown).
+    pub memory_limit_bytes: Option<usize>,
+    /// Whether the backend supports multi-device execution.
+    pub multi_device: bool,
+}
+
+// ── Backend Registry ───────────────────────────────────────────────
+
+/// Registry of available backends with priority-ordered selection.
+///
+/// Legacy anchor: P2C006-A01 (backends dict), P2C006-A06 (register_backend).
+/// Contract: p2c006.strict.inv001 (CPU always available).
+pub struct BackendRegistry {
+    backends: Vec<Box<dyn Backend>>,
+}
+
+impl BackendRegistry {
+    /// Create a registry with the given backends (first = highest priority).
+    pub fn new(backends: Vec<Box<dyn Backend>>) -> Self {
+        Self { backends }
+    }
+
+    /// Look up a backend by name. Returns None if not found.
+    pub fn get(&self, name: &str) -> Option<&dyn Backend> {
+        self.backends.iter().find(|b| b.name() == name).map(|b| b.as_ref())
+    }
+
+    /// Return the highest-priority (first) backend.
+    /// Legacy anchor: P2C006-A04 (default_backend).
+    pub fn default_backend(&self) -> Option<&dyn Backend> {
+        self.backends.first().map(|b| b.as_ref())
+    }
+
+    /// List all registered backend names.
+    pub fn available_backends(&self) -> Vec<&str> {
+        self.backends.iter().map(|b| b.name()).collect()
+    }
+
+    /// Resolve a DevicePlacement to a concrete (backend, DeviceId) pair.
+    ///
+    /// - `Default` → first backend's default device.
+    /// - `Explicit(id)` → search all backends for a device with that id.
+    ///
+    /// Legacy anchor: P2C006-A03 (get_backend).
+    pub fn resolve_placement(
+        &self,
+        placement: &DevicePlacement,
+        requested_backend: Option<&str>,
+    ) -> Result<(&dyn Backend, DeviceId), BackendError> {
+        match (placement, requested_backend) {
+            (DevicePlacement::Default, Some(name)) => {
+                let backend = self.get(name).ok_or_else(|| BackendError::Unavailable {
+                    backend: name.to_owned(),
+                })?;
+                Ok((backend, backend.default_device()))
+            }
+            (DevicePlacement::Default, None) => {
+                let backend =
+                    self.default_backend()
+                        .ok_or_else(|| BackendError::Unavailable {
+                            backend: "(none)".to_owned(),
+                        })?;
+                Ok((backend, backend.default_device()))
+            }
+            (DevicePlacement::Explicit(device_id), Some(name)) => {
+                let backend = self.get(name).ok_or_else(|| BackendError::Unavailable {
+                    backend: name.to_owned(),
+                })?;
+                Ok((backend, *device_id))
+            }
+            (DevicePlacement::Explicit(device_id), None) => {
+                let backend =
+                    self.default_backend()
+                        .ok_or_else(|| BackendError::Unavailable {
+                            backend: "(none)".to_owned(),
+                        })?;
+                Ok((backend, *device_id))
+            }
+        }
+    }
+
+    /// Resolve with fallback: if requested backend unavailable, fall back to
+    /// the default backend. Returns the resolved backend, device, and whether
+    /// a fallback occurred.
+    ///
+    /// Contract: p2c006.hardened.inv008 (missing backend → CPU fallback).
+    pub fn resolve_with_fallback(
+        &self,
+        placement: &DevicePlacement,
+        requested_backend: Option<&str>,
+    ) -> Result<(&dyn Backend, DeviceId, bool), BackendError> {
+        match self.resolve_placement(placement, requested_backend) {
+            Ok((backend, device)) => Ok((backend, device, false)),
+            Err(BackendError::Unavailable { .. }) => {
+                let fallback =
+                    self.default_backend()
+                        .ok_or_else(|| BackendError::Unavailable {
+                            backend: "(no fallback)".to_owned(),
+                        })?;
+                let device = match placement {
+                    DevicePlacement::Default => fallback.default_device(),
+                    DevicePlacement::Explicit(id) => *id,
+                };
+                Ok((fallback, device, true))
+            }
+            Err(other) => Err(other),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -5,8 +5,8 @@
 //!
 //! Contract: p2c006.strict.inv001 (CPU always available).
 
-use fj_core::{Jaxpr, Value};
-use fj_runtime::backend::{Backend, BackendError};
+use fj_core::{DType, Jaxpr, Value};
+use fj_runtime::backend::{Backend, BackendCapabilities, BackendError};
 use fj_runtime::buffer::Buffer;
 use fj_runtime::device::{DeviceId, DeviceInfo, Platform};
 
@@ -111,6 +111,15 @@ impl Backend for CpuBackend {
 
     fn version(&self) -> &str {
         &self.version_string
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            supported_dtypes: vec![DType::F64, DType::I64],
+            max_tensor_rank: 8,
+            memory_limit_bytes: None, // host memory, effectively unlimited
+            multi_device: self.device_count > 1,
+        }
     }
 }
 
@@ -241,5 +250,127 @@ mod tests {
         let mut buf = backend.allocate(4, DeviceId(0)).expect("alloc");
         buf.as_bytes_mut().copy_from_slice(&original);
         assert_eq!(buf.as_bytes(), &original[..]);
+    }
+
+    #[test]
+    fn cpu_backend_capabilities_supported_dtypes() {
+        let backend = CpuBackend::new();
+        let caps = backend.capabilities();
+        assert!(caps.supported_dtypes.contains(&DType::F64));
+        assert!(caps.supported_dtypes.contains(&DType::I64));
+    }
+
+    #[test]
+    fn cpu_backend_capabilities_rank_limit() {
+        let backend = CpuBackend::new();
+        let caps = backend.capabilities();
+        assert!(caps.max_tensor_rank >= 4);
+    }
+
+    #[test]
+    fn cpu_backend_capabilities_memory_unlimited() {
+        let backend = CpuBackend::new();
+        let caps = backend.capabilities();
+        assert!(caps.memory_limit_bytes.is_none());
+    }
+
+    #[test]
+    fn cpu_backend_single_device_not_multi() {
+        let backend = CpuBackend::new();
+        assert!(!backend.capabilities().multi_device);
+    }
+
+    #[test]
+    fn cpu_backend_multi_device_caps() {
+        let backend = CpuBackend::with_device_count(2);
+        assert!(backend.capabilities().multi_device);
+    }
+
+    // ── Registry tests ────────────────────────────────────────────
+
+    use fj_runtime::backend::BackendRegistry;
+    use fj_runtime::device::DevicePlacement;
+
+    #[test]
+    fn registry_get_by_name() {
+        let registry = BackendRegistry::new(vec![Box::new(CpuBackend::new())]);
+        assert!(registry.get("cpu").is_some());
+        assert!(registry.get("gpu").is_none());
+    }
+
+    #[test]
+    fn registry_default_backend() {
+        let registry = BackendRegistry::new(vec![Box::new(CpuBackend::new())]);
+        let default = registry.default_backend().expect("should have default");
+        assert_eq!(default.name(), "cpu");
+    }
+
+    #[test]
+    fn registry_available_backends() {
+        let registry = BackendRegistry::new(vec![Box::new(CpuBackend::new())]);
+        assert_eq!(registry.available_backends(), vec!["cpu"]);
+    }
+
+    #[test]
+    fn registry_resolve_default_placement() {
+        let registry = BackendRegistry::new(vec![Box::new(CpuBackend::new())]);
+        let (backend, device) = registry
+            .resolve_placement(&DevicePlacement::Default, None)
+            .expect("should resolve");
+        assert_eq!(backend.name(), "cpu");
+        assert_eq!(device, DeviceId(0));
+    }
+
+    #[test]
+    fn registry_resolve_explicit_backend() {
+        let registry = BackendRegistry::new(vec![Box::new(CpuBackend::new())]);
+        let (backend, device) = registry
+            .resolve_placement(&DevicePlacement::Default, Some("cpu"))
+            .expect("should resolve");
+        assert_eq!(backend.name(), "cpu");
+        assert_eq!(device, DeviceId(0));
+    }
+
+    #[test]
+    fn registry_resolve_unavailable_backend() {
+        let registry = BackendRegistry::new(vec![Box::new(CpuBackend::new())]);
+        let result = registry.resolve_placement(&DevicePlacement::Default, Some("gpu"));
+        match result {
+            Err(BackendError::Unavailable { backend }) => assert_eq!(backend, "gpu"),
+            Err(other) => panic!("expected Unavailable, got: {other}"),
+            Ok(_) => panic!("expected error for unavailable gpu backend"),
+        }
+    }
+
+    #[test]
+    fn registry_resolve_with_fallback() {
+        // Contract p2c006.hardened.inv008: missing backend → CPU fallback
+        let registry = BackendRegistry::new(vec![Box::new(CpuBackend::new())]);
+        let (backend, device, fell_back) = registry
+            .resolve_with_fallback(&DevicePlacement::Default, Some("gpu"))
+            .expect("should fallback to CPU");
+        assert_eq!(backend.name(), "cpu");
+        assert_eq!(device, DeviceId(0));
+        assert!(fell_back, "should report fallback occurred");
+    }
+
+    #[test]
+    fn registry_resolve_no_fallback_needed() {
+        let registry = BackendRegistry::new(vec![Box::new(CpuBackend::new())]);
+        let (backend, _, fell_back) = registry
+            .resolve_with_fallback(&DevicePlacement::Default, Some("cpu"))
+            .expect("should resolve directly");
+        assert_eq!(backend.name(), "cpu");
+        assert!(!fell_back, "no fallback should be needed");
+    }
+
+    #[test]
+    fn registry_resolve_explicit_device_id() {
+        let registry = BackendRegistry::new(vec![Box::new(CpuBackend::with_device_count(4))]);
+        let (backend, device) = registry
+            .resolve_placement(&DevicePlacement::Explicit(DeviceId(2)), Some("cpu"))
+            .expect("should resolve");
+        assert_eq!(backend.name(), "cpu");
+        assert_eq!(device, DeviceId(2));
     }
 }

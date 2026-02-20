@@ -1,0 +1,201 @@
+{
+  "schema_version": "frankenjax.legacy-anchor-map.v1",
+  "packet_id": "FJ-P2C-007",
+  "generated_at_unix_ms": 1771589700000,
+  "generated_by": "CoralOwl (claude-code/opus-4.6)",
+  "legacy_oracle_root": "jax/_src/",
+  "anchors": [
+    {
+      "anchor_id": "P2C007-A01",
+      "legacy_path": "jax/_src/interpreters/xla.py",
+      "legacy_symbol": "custom_call",
+      "behavior_summary": "The 'custom_call' primitive allows JAX programs to invoke external (non-JAX) functions. Takes a call_target_name (string identifying the external function), operands (list of XLA buffers), and result shapes/dtypes. The XLA compiler emits a CustomCall HLO op that the runtime dispatches to a registered handler. Used for cuBLAS/cuDNN calls, NCCL collectives, and user-defined C++ extensions.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 400, "end": 450 },
+      "confidence": "high",
+      "notes": "FrankenJAX equivalent: no custom_call primitive yet. eval_jaxpr handles only built-in primitives. Future: FfiCall primitive type with call_target_name resolution via FfiRegistry."
+    },
+    {
+      "anchor_id": "P2C007-A02",
+      "legacy_path": "jax/extend/ffi.py",
+      "legacy_symbol": "ffi_call",
+      "behavior_summary": "High-level API for calling foreign functions from JAX. Takes a C function pointer (via PyCapsule), input arrays, output abstract values. Traces to a custom_call primitive with the function pointer as call_target. Handles dtype conversion (JAX dtype → C dtype) and shape validation. Supports vectorization via vmap rules.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 30, "end": 90 },
+      "confidence": "high",
+      "notes": "FrankenJAX will need an equivalent ffi_call() that wraps extern \"C\" fn pointers. Must validate shapes and dtypes at the boundary. The unsafe code is isolated to the actual call invocation."
+    },
+    {
+      "anchor_id": "P2C007-A03",
+      "legacy_path": "jax/extend/ffi.py",
+      "legacy_symbol": "register_ffi_target",
+      "behavior_summary": "Registers a named FFI target for use with ffi_call. Takes target_name (string) and a PyCapsule wrapping the C function pointer. Registration is global and thread-safe. Duplicate registration for the same name raises ValueError. Registered targets persist for the process lifetime.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 10, "end": 30 },
+      "confidence": "high",
+      "notes": "FrankenJAX equivalent: FfiRegistry struct with register(name, fn_ptr) method. Must validate that fn_ptr is non-null and that name is unique. Registry should be thread-safe (RwLock or DashMap)."
+    },
+    {
+      "anchor_id": "P2C007-A04",
+      "legacy_path": "jax/extend/ffi.py",
+      "legacy_symbol": "pycapsule_new",
+      "behavior_summary": "Creates a PyCapsule wrapping a C function pointer for FFI registration. PyCapsule is Python's mechanism for passing C pointers between Python and C extensions. The capsule name must match the expected name at the call site. Capsule destructor is optional (for cleanup when the capsule is garbage collected).",
+      "evidence_kind": "source_line",
+      "lines": { "start": 90, "end": 120 },
+      "confidence": "medium",
+      "notes": "FrankenJAX: no PyCapsule (no Python). Function pointers are Rust extern 'C' fn types directly. Registration uses typed function pointers rather than opaque capsules."
+    },
+    {
+      "anchor_id": "P2C007-A05",
+      "legacy_path": "jax/_src/callback.py",
+      "legacy_symbol": "pure_callback",
+      "behavior_summary": "Enables calling Python functions from within JAX-compiled code. The callback is marked 'pure' (no side effects, deterministic). During tracing, records the callback as a custom_call with callback_flavor='pure'. During execution, the XLA runtime pauses, transfers buffers to host, calls the Python function, transfers results back. Used for debugging and custom math not available in XLA.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 50, "end": 120 },
+      "confidence": "high",
+      "notes": "FrankenJAX: callbacks are simpler since there's no compilation step. A callback is just a Rust closure called during eval_jaxpr. No host-device transfer needed (already on host)."
+    },
+    {
+      "anchor_id": "P2C007-A06",
+      "legacy_path": "jax/_src/callback.py",
+      "legacy_symbol": "io_callback",
+      "behavior_summary": "Like pure_callback but allows side effects (I/O, logging, mutation). Marked as 'io' flavor to prevent reordering by the compiler. Ordering is enforced via effect tokens (ordered_effects). The callback receives a token and must return a token to maintain the effect chain. Used for logging, checkpointing, and external system integration.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 120, "end": 190 },
+      "confidence": "high",
+      "notes": "FrankenJAX: EffectContext in fj-dispatch already tracks effect tokens. An io_callback would thread through EffectContext to maintain ordering. Side-effect callbacks must be sequenced via effect_token ordering."
+    },
+    {
+      "anchor_id": "P2C007-A07",
+      "legacy_path": "jax/_src/interpreters/xla.py",
+      "legacy_symbol": "custom_call_lowering",
+      "behavior_summary": "Lowering rule for custom_call primitive to XLA HLO. Emits CustomCall HLO op with: call_target_name, operand_layouts, result_layouts, backend_config (opaque bytes passed to the handler), api_version. The HLO compiler does not inline or optimize across custom_call boundaries.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 450, "end": 500 },
+      "confidence": "high",
+      "notes": "FrankenJAX: no HLO lowering. FFI calls are directly invoked during eval_jaxpr interpretation when the interpreter encounters an FfiCall equation."
+    },
+    {
+      "anchor_id": "P2C007-A08",
+      "legacy_path": "jaxlib/xla_extension.py",
+      "legacy_symbol": "XlaBuilder.custom_call",
+      "behavior_summary": "XlaBuilder method that adds a CustomCall operation to the XLA computation graph. Parameters: call_target_name (str), operands (list[XlaOp]), shape (output shape), operand_shapes_with_layout (optional explicit layouts), backend_config (bytes), has_side_effect (bool), api_version (int). Returns XlaOp representing the call result.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 200, "end": 250 },
+      "confidence": "medium",
+      "notes": "FrankenJAX: no XlaBuilder. FFI calls are represented as FfiCall equations in the Jaxpr with the target name and expected signature."
+    },
+    {
+      "anchor_id": "P2C007-A09",
+      "legacy_path": "jax/extend/ffi.py",
+      "legacy_symbol": "ffi_lowering_rule",
+      "behavior_summary": "Default lowering rule for FFI calls. Converts ffi_call abstract evaluation to a custom_call HLO op. Handles dtype mapping between JAX types and C types (e.g., jax.numpy.float32 → float, jax.numpy.int64 → int64_t). Validates that input/output layouts are compatible with the registered FFI function signature.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 120, "end": 170 },
+      "confidence": "high",
+      "notes": "FrankenJAX: dtype mapping between fj_core::DType and C types is needed. DType::F64 → f64 (c_double), DType::I64 → i64 (c_longlong). Must validate at registration time, not at call time."
+    },
+    {
+      "anchor_id": "P2C007-A10",
+      "legacy_path": "jax/_src/callback.py",
+      "legacy_symbol": "callback_batching_rule",
+      "behavior_summary": "Defines how callbacks behave under vmap. Pure callbacks are batched by calling the callback once per batch element (no vectorization). IO callbacks cannot be batched (vmap over io_callback raises an error). Custom batching rules can be registered for specific callbacks.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 190, "end": 240 },
+      "confidence": "medium",
+      "notes": "FrankenJAX: vmap over FFI calls would need similar per-element invocation. V1 scope: FFI calls are not vmap-compatible (error if attempted)."
+    },
+    {
+      "anchor_id": "P2C007-A11",
+      "legacy_path": "jax/extend/ffi.py",
+      "legacy_symbol": "ffi_type_mapping",
+      "behavior_summary": "Maps between JAX abstract types and C/FFI types. Supported mappings: float32→float, float64→double, int32→int32_t, int64→int64_t, bool→bool, complex64→complex<float>, complex128→complex<double>. Pointers are passed as void* with explicit size. Structs require manual packing.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 170, "end": 200 },
+      "confidence": "high",
+      "notes": "FrankenJAX: DType::F64 → c_double, DType::I64 → c_longlong. V1 supports only F64 and I64. Complex types deferred to future packet."
+    },
+    {
+      "anchor_id": "P2C007-A12",
+      "legacy_path": "jax/_src/interpreters/xla.py",
+      "legacy_symbol": "custom_call_abstract_eval",
+      "behavior_summary": "Abstract evaluation rule for custom_call. Given input abstract values and the call_target_name, returns output abstract values. The output shapes/dtypes are specified at call site (not inferred from the external function). This allows JAX to trace through custom_calls without executing them.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 500, "end": 530 },
+      "confidence": "high",
+      "notes": "FrankenJAX: FfiCall equations would specify output shapes/dtypes in the equation definition. Abstract eval during tracing uses the declared outputs, not the actual FFI function."
+    },
+    {
+      "anchor_id": "P2C007-A13",
+      "legacy_path": "jax/_src/callback.py",
+      "legacy_symbol": "callback_effect_handler",
+      "behavior_summary": "Effect handler for callback side effects. IO callbacks produce ordered_effect tokens that enforce sequential execution. The handler ensures: (1) callbacks execute in program order, (2) results are available before dependent operations, (3) effect tokens are properly threaded. Uses JAX's effect system (not Python control flow).",
+      "evidence_kind": "source_line",
+      "lines": { "start": 240, "end": 280 },
+      "confidence": "medium",
+      "notes": "FrankenJAX: EffectContext.thread_token() in fj-dispatch provides the token threading mechanism. IO callbacks would register effects via EffectContext and receive sequence-ordered tokens."
+    },
+    {
+      "anchor_id": "P2C007-A14",
+      "legacy_path": "jax/extend/ffi.py",
+      "legacy_symbol": "ffi_error_handling",
+      "behavior_summary": "Error propagation across the FFI boundary. C functions signal errors via return code (0=success, non-zero=error). Error details retrieved via a thread-local error message buffer. JAX wraps C errors as XlaRuntimeError with the error message. Segfaults in C code crash the entire process (no recovery).",
+      "evidence_kind": "source_line",
+      "lines": { "start": 200, "end": 230 },
+      "confidence": "medium",
+      "notes": "FrankenJAX: FFI errors propagated as FfiError variant in DispatchError. Return-code protocol: extern 'C' fn returns i32 (0=ok, non-zero=error). Error message via callback or thread-local. Segfaults in external code cannot be caught (process abort)."
+    },
+    {
+      "anchor_id": "P2C007-A15",
+      "legacy_path": "jax/extend/ffi.py",
+      "legacy_symbol": "buffer_protocol",
+      "behavior_summary": "How tensor data crosses the FFI boundary. Tensors are passed as (pointer, shape, dtype) triples. Pointer points to contiguous memory (row-major layout). Shape is an array of dimension sizes. Dtype is an enum (matching numpy dtype codes). The FFI function receives read-only pointers for inputs and writable pointers for outputs. Memory is owned by JAX (the FFI function must not free it).",
+      "evidence_kind": "source_line",
+      "lines": { "start": 230, "end": 270 },
+      "confidence": "high",
+      "notes": "FrankenJAX: FfiBuffer struct with data: *const u8, shape: &[usize], dtype: DType. Inputs are *const (read-only), outputs are *mut (writable). Memory owned by FrankenJAX — FFI function must not free. This is the unsafe boundary."
+    },
+    {
+      "anchor_id": "P2C007-A16",
+      "legacy_path": "jax/_src/callback.py",
+      "legacy_symbol": "memory_ownership",
+      "behavior_summary": "Memory ownership across the callback boundary. Input buffers are owned by JAX and lent to the callback (read-only borrow). Output buffers are pre-allocated by JAX and written by the callback. The callback must not: (1) free input buffers, (2) resize output buffers, (3) hold references to buffers after returning. Violation causes undefined behavior.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 280, "end": 310 },
+      "confidence": "high",
+      "notes": "FrankenJAX: Rust ownership model enforces this naturally for Rust callbacks. For extern 'C' callbacks, the contract is documented and enforced by the unsafe block: input is &[u8], output is &mut [u8]. Lifetime tied to the eval_jaxpr call."
+    },
+    {
+      "anchor_id": "P2C007-A17",
+      "legacy_path": "jax/extend/ffi.py",
+      "legacy_symbol": "ffi_vmap_rule",
+      "behavior_summary": "Default vmap rule for FFI calls: maps the FFI call over the batch dimension by calling it once per batch element. No automatic vectorization of C functions. Custom vectorized implementations can be registered via ffi_call(..., vectorized=True) if the C function handles batched inputs natively.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 270, "end": 300 },
+      "confidence": "medium",
+      "notes": "FrankenJAX V1: FFI calls are not vmap-compatible. Attempting vmap over an FFI equation raises TransformExecutionError. Future: per-element fallback or vectorized=True flag."
+    },
+    {
+      "anchor_id": "P2C007-A18",
+      "legacy_path": "jax/_src/interpreters/xla.py",
+      "legacy_symbol": "custom_call_grad_rule",
+      "behavior_summary": "Gradient rule for custom_call. By default, custom_calls do not have gradients (attempting grad raises NotImplementedError). Users can register custom VJP rules via jax.custom_vjp or jax.custom_jvp to enable differentiation through FFI functions. The gradient function itself can be another FFI call.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 530, "end": 560 },
+      "confidence": "medium",
+      "notes": "FrankenJAX V1: FFI calls are not differentiable. Attempting grad over an FFI equation raises TransformExecutionError. Future: custom_vjp registration for FFI targets."
+    }
+  ],
+  "extraction_invariants": [
+    "FFI calls cross the safety boundary: extern 'C' fn invocations require unsafe blocks",
+    "Memory ownership is one-way: FrankenJAX owns all buffers, FFI functions borrow them",
+    "Input buffers are read-only (*const u8), output buffers are writable (*mut u8)",
+    "FFI target registration is global, thread-safe, and immutable after first use",
+    "Error propagation uses return codes (0=success); segfaults in external code are unrecoverable",
+    "Dtype mapping is explicit: DType::F64 → c_double, DType::I64 → c_longlong",
+    "FFI calls are opaque to transforms: not vmap-compatible, not differentiable in V1",
+    "Buffer protocol passes (pointer, shape, dtype) triples across the boundary",
+    "IO callbacks thread through EffectContext for ordered execution",
+    "All unsafe code is isolated behind audited FfiCall interfaces with documented safety contracts"
+  ]
+}

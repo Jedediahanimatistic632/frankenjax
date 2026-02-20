@@ -1,0 +1,65 @@
+{
+  "schema_version": "frankenjax.e2e-forensic-log.v1",
+  "scenario_id": "transform_composition_matrix",
+  "test_id": "e2e_p2c004_transform_composition_matrix",
+  "packet_id": "FJ-P2C-004",
+  "fixture_id": "p2c004-e2e-transform_composition_matrix",
+  "seed": null,
+  "mode": "Strict",
+  "ts_utc_unix_ms": 1771588983749,
+  "env": {
+    "packet": "FJ-P2C-004",
+    "rust_version": "0.1.0"
+  },
+  "artifact_refs": [
+    "crates/fj-dispatch/src/lib.rs",
+    "crates/fj-ad/src/lib.rs"
+  ],
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c004 -- e2e_p2c004_transform_composition_matrix --nocapture",
+  "input_capture": {
+    "compositions": 7
+  },
+  "intermediate_states": [
+    {
+      "cache_key": "fjx-90afc045c399ed3bad94d18a7bbcc70e46a6bcf3d4a2793a52fa52af415df7e8",
+      "composition": "jit_only",
+      "status": "OK"
+    },
+    {
+      "cache_key": "fjx-956d8b29b9d0c2c8abe91a3da10ea3360c36f9029e3efc72f072143c2ce7a162",
+      "composition": "grad_only",
+      "status": "OK"
+    },
+    {
+      "cache_key": "fjx-feea388aecff1e279a996f7a66338e88af40a3bcfc5b073d796fdca090f13c29",
+      "composition": "vmap_only",
+      "status": "OK"
+    },
+    {
+      "cache_key": "fjx-76d109d1362137c3a8b2a7622f21dddd95dc24d5ea94e8871b2e0ac90fdaa159",
+      "composition": "jit_grad",
+      "status": "OK"
+    },
+    {
+      "cache_key": "fjx-19d96db774902eaf9a179ed49dda2a7a2a1084c69e7aba1ef5b57296a759cab5",
+      "composition": "jit_vmap",
+      "status": "OK"
+    },
+    {
+      "cache_key": "fjx-1c7921c787f9b87a30ef1e47958f29e1328b8bc2e9d92e78643a2a913d6933d1",
+      "composition": "vmap_grad",
+      "status": "OK"
+    },
+    {
+      "cache_key": "fjx-698e39bb9aa112ec01e46238da4ea3b2a603bccd2ca0e03011aeeab77301cbf9",
+      "composition": "jit_vmap_grad",
+      "status": "OK"
+    }
+  ],
+  "output_capture": {
+    "distinct_keys": 7
+  },
+  "result": "PASS",
+  "duration_ms": 0,
+  "details": null
+}

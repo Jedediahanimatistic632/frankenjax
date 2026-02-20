@@ -1,0 +1,40 @@
+{
+  "schema_version": "frankenjax.e2e-forensic-log.v1",
+  "scenario_id": "dispatch_under_load",
+  "test_id": "e2e_p2c004_dispatch_under_load",
+  "packet_id": "FJ-P2C-004",
+  "fixture_id": "p2c004-e2e-dispatch_under_load",
+  "seed": null,
+  "mode": "Strict",
+  "ts_utc_unix_ms": 1771588983765,
+  "env": {
+    "packet": "FJ-P2C-004",
+    "rust_version": "0.1.0"
+  },
+  "artifact_refs": [
+    "crates/fj-dispatch/src/lib.rs",
+    "crates/fj-ad/src/lib.rs"
+  ],
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c004 -- e2e_p2c004_dispatch_under_load --nocapture",
+  "input_capture": {
+    "iterations": 1000
+  },
+  "intermediate_states": [
+    {
+      "drift_count": 0,
+      "iterations": 1000,
+      "p50_ns": 15489,
+      "p95_ns": 18224,
+      "p99_ns": 30417
+    }
+  ],
+  "output_capture": {
+    "drift_count": 0,
+    "p50_ns": 15489,
+    "p95_ns": 18224,
+    "p99_ns": 30417
+  },
+  "result": "PASS",
+  "duration_ms": 16,
+  "details": null
+}

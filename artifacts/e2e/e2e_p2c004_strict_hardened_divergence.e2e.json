@@ -1,0 +1,43 @@
+{
+  "schema_version": "frankenjax.e2e-forensic-log.v1",
+  "scenario_id": "strict_hardened_divergence",
+  "test_id": "e2e_p2c004_strict_hardened_divergence",
+  "packet_id": "FJ-P2C-004",
+  "fixture_id": "p2c004-e2e-strict_hardened_divergence",
+  "seed": null,
+  "mode": "Strict",
+  "ts_utc_unix_ms": 1771588983748,
+  "env": {
+    "packet": "FJ-P2C-004",
+    "rust_version": "0.1.0"
+  },
+  "artifact_refs": [
+    "crates/fj-dispatch/src/lib.rs",
+    "crates/fj-ad/src/lib.rs"
+  ],
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c004 -- e2e_p2c004_strict_hardened_divergence --nocapture",
+  "input_capture": {
+    "features": [
+      "future.sharding.v2"
+    ]
+  },
+  "intermediate_states": [
+    {
+      "mode": "strict",
+      "result": "REJECTED"
+    },
+    {
+      "cache_key": "fjx-93282411796aa4d863269ec87b65977a7ba8e8f646dbd26851d608a84fe79be7",
+      "mode": "hardened",
+      "output": "[Scalar(I64(30))]",
+      "result": "ACCEPTED"
+    }
+  ],
+  "output_capture": {
+    "hardened": "accepted",
+    "strict": "rejected"
+  },
+  "result": "PASS",
+  "duration_ms": 0,
+  "details": null
+}

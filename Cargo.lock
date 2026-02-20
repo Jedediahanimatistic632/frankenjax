@@ -583,9 +583,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fj-backend-cpu"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "fj-core",
+ "fj-interpreters",
+ "fj-runtime",
+ "fj-test-utils",
+ "proptest",
+]
+
+[[package]]
 name = "fj-cache"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "fj-core",
  "fj-test-utils",
  "proptest",
@@ -598,11 +611,16 @@ version = "0.1.0"
 dependencies = [
  "asupersync",
  "base64",
+ "fj-ad",
  "fj-api",
+ "fj-backend-cpu",
  "fj-cache",
  "fj-core",
  "fj-dispatch",
+ "fj-ffi",
  "fj-interpreters",
+ "fj-lax",
+ "fj-runtime",
  "fj-test-utils",
  "jsonschema",
  "serde",
@@ -634,6 +652,7 @@ dependencies = [
  "fj-interpreters",
  "fj-ledger",
  "fj-test-utils",
+ "proptest",
  "smallvec",
 ]
 
@@ -646,6 +665,16 @@ dependencies = [
  "fj-interpreters",
  "fj-test-utils",
  "smallvec",
+]
+
+[[package]]
+name = "fj-ffi"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "fj-core",
+ "fj-test-utils",
+ "proptest",
 ]
 
 [[package]]
@@ -667,8 +696,10 @@ dependencies = [
 name = "fj-lax"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "fj-core",
  "fj-test-utils",
+ "proptest",
 ]
 
 [[package]]

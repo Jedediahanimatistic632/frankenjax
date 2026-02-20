@@ -1,0 +1,76 @@
+{
+  "schema_version": "frankenjax.evidence-manifest.v1",
+  "packet_id": "FJ-P2C-008",
+  "subsystem": "lax_primitives",
+  "generated_at": "2026-02-20T13:10:00Z",
+  "parity_gates": [
+    {
+      "gate_id": "G1",
+      "name": "Artifact format compliance",
+      "status": "PASS",
+      "evidence": "legacy_anchor_map.v1.json, contract_table.v1.json, security_threat_matrix.md — all schema-validated"
+    },
+    {
+      "gate_id": "G2",
+      "name": "Unit tests",
+      "status": "PASS",
+      "evidence": "100 unit tests in fj-lax: 14 arithmetic_scalar, 6 arithmetic_vector, 10 transcendental, 12 comparison, 8 reduction, 10 tensor_ops, 6 broadcasting, 4 type_promotion, 10 error_paths, 16 nan_inf_ieee754, 11 property_tests, 1 schema_contract"
+    },
+    {
+      "gate_id": "G3",
+      "name": "Oracle/differential conformance",
+      "status": "PASS",
+      "evidence": "25 oracle tests covering all primitive categories: arithmetic (10), transcendental (6), comparison (4), reduction (4), shape_ops (5), dot (2) — all hand-verified against JAX documented behavior"
+    },
+    {
+      "gate_id": "G4",
+      "name": "Adversarial validation",
+      "status": "PASS",
+      "evidence": "12 adversarial tests: incompatible shapes (4), arity violations (3), unsupported primitives (2), large tensor (1), inverted slice (1), double inferred dims (1)"
+    },
+    {
+      "gate_id": "G5",
+      "name": "Metamorphic properties",
+      "status": "PASS",
+      "evidence": "8 metamorphic tests: add/mul identity, neg involution, exp-log inverse, transpose involution, reduce_sum manual match, abs idempotent, max-min agreement"
+    },
+    {
+      "gate_id": "G6",
+      "name": "Performance targets",
+      "status": "PASS",
+      "evidence": "All 10 benchmarks baselined. Dispatch overhead=11ns (<50ns target). Add scalar=11ns. Add 1K=17.6us. Dot 100=596ns. Reshape 1K=570ns."
+    },
+    {
+      "gate_id": "G7",
+      "name": "E2E scenarios",
+      "status": "PASS",
+      "evidence": "10 E2E scenarios: all-primitives-scalar, rank1/rank2 tensor, 3 composition chains (add-mul-reduce, exp-log roundtrip, reshape-transpose-reshape), NaN/Inf edges, NaN comparison, error paths, broadcasting pipeline"
+    },
+    {
+      "gate_id": "G8",
+      "name": "Property tests",
+      "status": "PASS",
+      "evidence": "11 proptest property tests: commutativity (add/mul/max/min), neg involution, abs non-negative, reshape roundtrip, reduce_sum/prod manual match, eq reflexive, add-sub inverse (256+ cases each)"
+    },
+    {
+      "gate_id": "G9",
+      "name": "Risk analysis",
+      "status": "PASS",
+      "evidence": "10-invariant risk note. 12-threat security matrix. 30-row compatibility envelope. 10 fail-closed rules. Zero unsafe code (#![forbid(unsafe_code)]). Known divergences documented: round() banker's vs half-away, Gather/Scatter unsupported, limited broadcasting."
+    },
+    {
+      "gate_id": "G10",
+      "name": "Durability (RaptorQ)",
+      "status": "PASS",
+      "evidence": "conformance_report sidecar, perf_delta sidecar"
+    }
+  ],
+  "overall_verdict": "PASS",
+  "known_issues": [
+    "Gather/Scatter primitives return Unsupported error (high risk — programs using these will fail)",
+    "round(2.5)=3 (Rust half-away-from-zero) vs JAX banker's rounding round(2.5)=2",
+    "broadcast_in_dim: scalar-tensor only, no full NumPy broadcasting",
+    "Reductions support single-axis only (no multi-axis reduction)",
+    "Complex dtypes (complex64/complex128) not supported"
+  ]
+}

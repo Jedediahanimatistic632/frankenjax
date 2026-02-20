@@ -1,0 +1,49 @@
+{
+  "schema_version": "frankenjax.e2e-forensic-log.v1",
+  "scenario_id": "full_dispatch_pipeline",
+  "test_id": "e2e_p2c004_full_dispatch_pipeline",
+  "packet_id": "FJ-P2C-004",
+  "fixture_id": "p2c004-e2e-full_dispatch_pipeline",
+  "seed": null,
+  "mode": "Strict",
+  "ts_utc_unix_ms": 1771588983748,
+  "env": {
+    "packet": "FJ-P2C-004",
+    "rust_version": "0.1.0"
+  },
+  "artifact_refs": [
+    "crates/fj-dispatch/src/lib.rs",
+    "crates/fj-ad/src/lib.rs"
+  ],
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c004 -- e2e_p2c004_full_dispatch_pipeline --nocapture",
+  "input_capture": {
+    "program": "Square",
+    "transforms": [
+      "Jit",
+      "Grad"
+    ],
+    "x": 3.0
+  },
+  "intermediate_states": [
+    {
+      "phase": "request_built",
+      "transforms": [
+        "jit",
+        "grad"
+      ]
+    },
+    {
+      "cache_key": "fjx-76d109d1362137c3a8b2a7622f21dddd95dc24d5ea94e8871b2e0ac90fdaa159",
+      "ledger_entries": 1,
+      "output_count": 1,
+      "phase": "dispatch_complete"
+    }
+  ],
+  "output_capture": {
+    "cache_key": "fjx-76d109d1362137c3a8b2a7622f21dddd95dc24d5ea94e8871b2e0ac90fdaa159",
+    "derivative": 6.0
+  },
+  "result": "PASS",
+  "duration_ms": 0,
+  "details": null
+}

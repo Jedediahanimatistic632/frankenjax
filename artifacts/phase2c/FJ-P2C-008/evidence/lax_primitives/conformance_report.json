@@ -1,0 +1,101 @@
+{
+  "schema_version": "frankenjax.conformance-report.v1",
+  "packet_id": "FJ-P2C-008",
+  "subsystem": "lax_primitives",
+  "generated_at": "2026-02-20T13:00:00Z",
+  "test_suites": [
+    {
+      "suite": "fj-lax unit tests",
+      "test_count": 100,
+      "passed": 100,
+      "failed": 0,
+      "categories": {
+        "arithmetic_scalar": 14,
+        "arithmetic_vector": 6,
+        "transcendental": 10,
+        "comparison": 12,
+        "reduction": 8,
+        "tensor_ops": 10,
+        "broadcasting": 6,
+        "type_promotion": 4,
+        "error_paths": 10,
+        "nan_inf_ieee754": 16,
+        "property_tests": 11,
+        "schema_contract": 1
+      },
+      "notes": "Includes 11 proptest property tests (commutativity, involution, roundtrip, reflexivity)"
+    },
+    {
+      "suite": "lax_oracle conformance",
+      "test_count": 50,
+      "passed": 50,
+      "failed": 0,
+      "categories": {
+        "oracle_arithmetic": 10,
+        "oracle_transcendental": 6,
+        "oracle_comparison": 4,
+        "oracle_reduction": 4,
+        "oracle_shape_ops": 5,
+        "oracle_dot": 2,
+        "metamorphic": 8,
+        "adversarial": 12
+      },
+      "notes": "All oracle values hand-verified against JAX documented behavior"
+    },
+    {
+      "suite": "e2e_p2c008",
+      "test_count": 10,
+      "passed": 10,
+      "failed": 0,
+      "categories": {
+        "all_primitives_scalar": 1,
+        "all_primitives_tensor_rank1": 1,
+        "tensor_rank2": 1,
+        "composition": 3,
+        "edge_cases": 2,
+        "error_paths": 1,
+        "broadcasting": 1
+      }
+    }
+  ],
+  "total_tests": 160,
+  "total_passed": 160,
+  "total_failed": 0,
+  "primitive_coverage": {
+    "Add": { "unit": 4, "oracle": 3, "e2e": 3 },
+    "Sub": { "unit": 3, "oracle": 2, "e2e": 2 },
+    "Mul": { "unit": 3, "oracle": 3, "e2e": 2 },
+    "Max": { "unit": 3, "oracle": 3, "e2e": 1 },
+    "Min": { "unit": 2, "oracle": 2, "e2e": 1 },
+    "Pow": { "unit": 2, "oracle": 3, "e2e": 1 },
+    "Neg": { "unit": 4, "oracle": 3, "e2e": 2 },
+    "Abs": { "unit": 4, "oracle": 3, "e2e": 2 },
+    "Exp": { "unit": 4, "oracle": 4, "e2e": 2 },
+    "Log": { "unit": 3, "oracle": 4, "e2e": 2 },
+    "Sqrt": { "unit": 3, "oracle": 4, "e2e": 1 },
+    "Rsqrt": { "unit": 3, "oracle": 2, "e2e": 1 },
+    "Floor": { "unit": 3, "oracle": 2, "e2e": 1 },
+    "Ceil": { "unit": 2, "oracle": 2, "e2e": 1 },
+    "Round": { "unit": 2, "oracle": 2, "e2e": 1 },
+    "Sin": { "unit": 3, "oracle": 2, "e2e": 1 },
+    "Cos": { "unit": 2, "oracle": 2, "e2e": 1 },
+    "Dot": { "unit": 3, "oracle": 2, "e2e": 2 },
+    "Eq": { "unit": 3, "oracle": 3, "e2e": 2 },
+    "Ne": { "unit": 2, "oracle": 3, "e2e": 1 },
+    "Lt": { "unit": 4, "oracle": 3, "e2e": 2 },
+    "Le": { "unit": 3, "oracle": 3, "e2e": 1 },
+    "Gt": { "unit": 3, "oracle": 3, "e2e": 2 },
+    "Ge": { "unit": 2, "oracle": 3, "e2e": 1 },
+    "ReduceSum": { "unit": 4, "oracle": 2, "e2e": 3 },
+    "ReduceMax": { "unit": 3, "oracle": 1, "e2e": 1 },
+    "ReduceMin": { "unit": 3, "oracle": 1, "e2e": 1 },
+    "ReduceProd": { "unit": 3, "oracle": 1, "e2e": 1 },
+    "Reshape": { "unit": 4, "oracle": 1, "e2e": 3 },
+    "Transpose": { "unit": 3, "oracle": 1, "e2e": 2 },
+    "BroadcastInDim": { "unit": 2, "oracle": 1, "e2e": 1 },
+    "Concatenate": { "unit": 2, "oracle": 1, "e2e": 1 },
+    "Slice": { "unit": 2, "oracle": 1, "e2e": 1 },
+    "Gather": { "unit": 1, "oracle": 1, "e2e": 0 },
+    "Scatter": { "unit": 1, "oracle": 1, "e2e": 0 }
+  }
+}

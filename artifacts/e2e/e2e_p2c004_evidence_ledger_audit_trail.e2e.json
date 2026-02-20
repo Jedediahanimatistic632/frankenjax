@@ -1,0 +1,60 @@
+{
+  "schema_version": "frankenjax.e2e-forensic-log.v1",
+  "scenario_id": "evidence_ledger_audit_trail",
+  "test_id": "e2e_p2c004_evidence_ledger_audit_trail",
+  "packet_id": "FJ-P2C-004",
+  "fixture_id": "p2c004-e2e-evidence_ledger_audit_trail",
+  "seed": null,
+  "mode": "Strict",
+  "ts_utc_unix_ms": 1771588983749,
+  "env": {
+    "packet": "FJ-P2C-004",
+    "rust_version": "0.1.0"
+  },
+  "artifact_refs": [
+    "crates/fj-dispatch/src/lib.rs",
+    "crates/fj-ad/src/lib.rs"
+  ],
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c004 -- e2e_p2c004_evidence_ledger_audit_trail --nocapture",
+  "input_capture": {
+    "dispatch_count": 5
+  },
+  "intermediate_states": [
+    {
+      "decision_id": "fjx-90afc045c399ed3bad94d18a7bbcc70e46a6bcf3d4a2793a52fa52af415df7e8",
+      "dispatch": 0,
+      "ledger_entries": 1,
+      "signal_count": 4
+    },
+    {
+      "decision_id": "fjx-956d8b29b9d0c2c8abe91a3da10ea3360c36f9029e3efc72f072143c2ce7a162",
+      "dispatch": 1,
+      "ledger_entries": 1,
+      "signal_count": 4
+    },
+    {
+      "decision_id": "fjx-feea388aecff1e279a996f7a66338e88af40a3bcfc5b073d796fdca090f13c29",
+      "dispatch": 2,
+      "ledger_entries": 1,
+      "signal_count": 4
+    },
+    {
+      "decision_id": "fjx-76d109d1362137c3a8b2a7622f21dddd95dc24d5ea94e8871b2e0ac90fdaa159",
+      "dispatch": 3,
+      "ledger_entries": 1,
+      "signal_count": 4
+    },
+    {
+      "decision_id": "fjx-19d96db774902eaf9a179ed49dda2a7a2a1084c69e7aba1ef5b57296a759cab5",
+      "dispatch": 4,
+      "ledger_entries": 1,
+      "signal_count": 4
+    }
+  ],
+  "output_capture": {
+    "all_ledgers_valid": true
+  },
+  "result": "PASS",
+  "duration_ms": 0,
+  "details": null
+}

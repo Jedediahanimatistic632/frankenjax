@@ -1,0 +1,12 @@
+[package]
+name = "fj-backend-cpu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fj-core = { path = "../fj-core" }
+fj-runtime = { path = "../fj-runtime" }
+fj-interpreters = { path = "../fj-interpreters" }
+
+[dev-dependencies]
+fj-test-utils = { path = "../fj-test-utils" }

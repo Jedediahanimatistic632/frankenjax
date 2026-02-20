@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+pub mod backend;
+pub mod buffer;
+pub mod device;
+
 use fj_core::CompatibilityMode;
 use fj_ledger::{DecisionAction, LossMatrix, recommend_action};
 

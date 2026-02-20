@@ -1,0 +1,181 @@
+//! Buffer types for device-side memory management.
+//!
+//! V1 scope: host-resident buffers backed by Vec<u8>. Buffers represent
+//! owned, contiguous memory regions. The CPU backend allocates buffers
+//! via the Rust global allocator.
+//!
+//! Legacy anchor: P2C006-A10 (Buffer: device-resident array),
+//! P2C006-A23 (transfer_to_device).
+
+use crate::device::DeviceId;
+
+/// A contiguous memory region on a specific device.
+///
+/// V1: always host-resident (CPU backend). The `device` field tracks
+/// ownership for future multi-device support.
+///
+/// Invariant: `data.len() == size` at all times.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Buffer {
+    /// Raw buffer data.
+    data: Vec<u8>,
+    /// Device that owns this buffer.
+    device: DeviceId,
+}
+
+impl Buffer {
+    /// Create a new buffer with the given data on the specified device.
+    #[must_use]
+    pub fn new(data: Vec<u8>, device: DeviceId) -> Self {
+        Self { data, device }
+    }
+
+    /// Create a zero-initialized buffer of the given size.
+    #[must_use]
+    pub fn zeroed(size: usize, device: DeviceId) -> Self {
+        Self {
+            data: vec![0u8; size],
+            device,
+        }
+    }
+
+    /// The device that owns this buffer.
+    #[must_use]
+    pub fn device(&self) -> DeviceId {
+        self.device
+    }
+
+    /// Buffer size in bytes.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Read-only view of the buffer data.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Mutable view of the buffer data.
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
+    /// Consume the buffer and return the underlying data.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+}
+
+/// Read-only view into a sub-region of a Buffer.
+///
+/// V1: simple slice reference. Future: could support zero-copy views
+/// with reference counting for shared device memory.
+#[derive(Debug, Clone, Copy)]
+pub struct BufferView<'a> {
+    data: &'a [u8],
+    device: DeviceId,
+}
+
+impl<'a> BufferView<'a> {
+    /// Create a view of the entire buffer.
+    #[must_use]
+    pub fn from_buffer(buffer: &'a Buffer) -> Self {
+        Self {
+            data: buffer.as_bytes(),
+            device: buffer.device(),
+        }
+    }
+
+    /// Create a view of a sub-region.
+    ///
+    /// Returns None if the range is out of bounds.
+    #[must_use]
+    pub fn slice(&self, offset: usize, len: usize) -> Option<Self> {
+        if offset + len > self.data.len() {
+            return None;
+        }
+        Some(Self {
+            data: &self.data[offset..offset + len],
+            device: self.device,
+        })
+    }
+
+    /// The device that owns the underlying buffer.
+    #[must_use]
+    pub fn device(&self) -> DeviceId {
+        self.device
+    }
+
+    /// View size in bytes.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Read-only access to the viewed data.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffer_new_and_accessors() {
+        let buf = Buffer::new(vec![1, 2, 3, 4], DeviceId(0));
+        assert_eq!(buf.device(), DeviceId(0));
+        assert_eq!(buf.size(), 4);
+        assert_eq!(buf.as_bytes(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn buffer_zeroed() {
+        let buf = Buffer::zeroed(8, DeviceId(0));
+        assert_eq!(buf.size(), 8);
+        assert!(buf.as_bytes().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn buffer_into_bytes() {
+        let buf = Buffer::new(vec![10, 20], DeviceId(0));
+        let data = buf.into_bytes();
+        assert_eq!(data, vec![10, 20]);
+    }
+
+    #[test]
+    fn buffer_view_from_buffer() {
+        let buf = Buffer::new(vec![1, 2, 3, 4, 5], DeviceId(0));
+        let view = BufferView::from_buffer(&buf);
+        assert_eq!(view.size(), 5);
+        assert_eq!(view.device(), DeviceId(0));
+        assert_eq!(view.as_bytes(), &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn buffer_view_slice() {
+        let buf = Buffer::new(vec![10, 20, 30, 40, 50], DeviceId(0));
+        let view = BufferView::from_buffer(&buf);
+
+        let sub = view.slice(1, 3).expect("valid slice");
+        assert_eq!(sub.as_bytes(), &[20, 30, 40]);
+        assert_eq!(sub.size(), 3);
+
+        // Out of bounds
+        assert!(view.slice(3, 5).is_none());
+    }
+
+    #[test]
+    fn buffer_roundtrip_preserves_data() {
+        // Contract p2c006.strict.inv003: device_put/device_get round-trip
+        let original = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let buf = Buffer::new(original.clone(), DeviceId(0));
+        let recovered = buf.into_bytes();
+        assert_eq!(original, recovered);
+    }
+}

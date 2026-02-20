@@ -617,6 +617,138 @@ Confidence scale:
 | `16. Security/Compatibility Edge Cases and Undefined Zones` | `Medium` | explicit undefined zones are documented but expected to shrink | packet closure of currently undefined surfaces |
 | `17. Pass-A Closure Crosswalk` | `Medium-High` | crosswalk is internally consistent with documented sections and gap matrix | gap matrix revision |
 | `18. Unit/E2E Test Corpus and Logging Evidence Crosswalk` | `Medium` | mapped to current test/log corpus, which is actively growing | new tests/schemas or renamed scenarios |
+| `20. Complexity, Performance, and Memory Characterization` | `Medium-High` | complexity classes derived from code-anchored loop/structure analysis; memory growth from concrete data structure inspection | major algorithm changes, new primitive implementations, or parallelism introduction |
 
 Pass-A structure specialist note:
 - This confidence table should be refreshed whenever bead `bd-3dl.23.14` (final consistency/sign-off) runs, and at every major crate-boundary change.
+
+## 20. Complexity, Performance, and Memory Characterization (DOC-PASS-05)
+
+### 20.1 Rust Subsystem Complexity Classes (Code-Anchored)
+
+| Subsystem | Function | Complexity | Key dimensions | Code anchor |
+|---|---|---|---|---|
+| IR validation | `Jaxpr::validate_well_formed` | O((V + E) * log V) | V = variables, E = equations | `fj-core/src/lib.rs:650-705` |
+| Canonical fingerprint | `Jaxpr::canonical_fingerprint` | O(E) amortized O(1) | E = equations (cached via OnceLock) | `fj-core/src/lib.rs:620-648` |
+| Transform composition proof | `verify_transform_composition` | O(S) | S = transform stack depth (typically <= 3) | `fj-core/src/lib.rs:947-997` |
+| Trace materialization | `SimpleTraceContext::process_primitive` | O(K * log T) | K = input arity, T = tracer count | `fj-trace/src/lib.rs:576-603` |
+| Shape inference (elementwise) | `infer_primitive_output_avals` | O(max(R1, R2)) | R = tensor rank | `fj-trace/src/lib.rs:369-394` |
+| Jaxpr building from trace | `build_closed_jaxpr` | O(E * K * log E) | E = equations, K = avg arity | `fj-trace/src/lib.rs:458-572` |
+| Primitive eval (elementwise) | `eval_primitive` (Add, Sub, Mul, etc.) | O(N) | N = total tensor elements | `fj-lax/src/lib.rs:85-229` |
+| Primitive eval (dot product) | `eval_primitive` (Dot) | O(N) | N = vector length | `fj-lax/src/lib.rs:277-347` |
+| Primitive eval (transpose) | `eval_transpose` | O(N * R) | N = elements, R = rank | `fj-lax/src/lib.rs:548-636` |
+| Primitive eval (broadcast) | `eval_broadcast_in_dim` | O(N * R) | N = output elements, R = output rank | `fj-lax/src/lib.rs:640-754` |
+| Primitive eval (concatenate) | `eval_concatenate` | O(N * E_in) | N = output elements, E_in = input tensor count | `fj-lax/src/lib.rs:758-883` |
+| Primitive eval (slice) | `eval_slice` | O(N + R) | N = output elements, R = rank | `fj-lax/src/lib.rs:887-971` |
+| Primitive eval (reduce) | `eval_primitive` (ReduceSum, etc.) | O(N) | N = input elements | `fj-lax/src/lib.rs:350-392` |
+| IR interpreter | `eval_jaxpr_with_consts` | O(E * K_max) | E = equations, K_max = max primitive cost | `fj-interpreters/src/lib.rs:65-132` |
+| Partial evaluation | `partial_eval_jaxpr` | O(E * K) | E = equations, K = avg equation size | `fj-interpreters/src/partial_eval.rs:112-150` |
+| AD forward pass | `forward_with_tape` | O(E * K_max) | E = equations, K_max = max primitive cost | `fj-ad/src/lib.rs:49-109` |
+| AD backward pass | `backward` | O(E * K * log V) | E = equations, K = arity, V = variables | `fj-ad/src/lib.rs:111-143` |
+| Dispatch orchestration | `dispatch` | O(E + S) | E = equations (hash), S = stack depth | `fj-dispatch/src/lib.rs:135-186` |
+| Grad transform execution | `execute_grad` | O(E * K_max) | E = equations | `fj-dispatch/src/lib.rs:204-229` |
+| Vmap transform execution | `execute_vmap` | O(L * E * K_max) | L = leading dim, E = equations | `fj-dispatch/src/lib.rs:262-352` |
+| Cache key (streaming hash) | `hash_canonical_payload_ref` | O(E + S + C) | E = equations, S = stack, C = compile opts | `fj-cache/src/lib.rs:112-154` |
+| Cache key (string build) | `canonical_payload` | O(E + S + C) | same as above | `fj-cache/src/lib.rs:156-183` |
+| E-graph build | `jaxpr_to_egraph` | O(E * K) | E = equations, K = avg arity | `fj-egraph/src/lib.rs:82-160` |
+| E-graph saturation | `egg::Runner::run` | O(M * (E + R)^2) worst case | M = iterations, R = rewrite rules | external `egg` library |
+| Durability encode | `encode_artifact_to_sidecar` | O(S + T * log T) | S = artifact bytes, T = symbol count | `fj-conformance/src/durability.rs:126-200` |
+| Durability scrub | `scrub_sidecar` | O(S + T * log T) | same dimensions | `fj-conformance/src/durability.rs` |
+| Durability decode proof | `generate_decode_proof` | O(S + T * log T) | same dimensions | `fj-conformance/src/durability.rs` |
+
+### 20.2 Rust Memory Growth Model
+
+| Growth driver | Owner crate | Formula | Peak trigger | Current mitigation |
+|---|---|---|---|---|
+| Tensor element storage | `fj-core` (`TensorValue`) | O(N) where N = product of dims | large tensors (rank >= 3 with big dims) | dense `Vec<Literal>` storage; no lazy/view semantics |
+| Tensor stack (vmap output) | `fj-core` (`stack_axis0`) | O(L * N) | vmap over large tensors | multiple clone/extend calls during stacking |
+| Trace context accumulation | `fj-trace` (`tracer_avals`) | O(T) where T = total traced values | complex programs with many traced intermediates | BTreeMap; no pruning during trace |
+| Trace frame stack | `fj-trace` (`frame_stack`) | O(D * E_frame) | deep nesting with large per-frame equation counts | Vec of TraceFrames |
+| Interpreter environment | `fj-interpreters` (`eval_jaxpr`) | O(V) | V = total bound variables in program | FxHashMap grows with program size; no dead-var cleanup during eval |
+| AD tape | `fj-ad` (`TapeEntry` list) | O(E * K) | large programs under grad | stores input values per equation; clones values at tape recording |
+| Adjoint map | `fj-ad` (`backward`) | O(V) | all differentiable variables | BTreeMap accumulating gradients |
+| Vmap intermediate outputs | `fj-dispatch` (`execute_vmap`) | O(L * O) | L = leading dim, O = output count | all L iteration outputs held simultaneously before stacking |
+| Cache key string | `fj-cache` (`canonical_payload`) | O(E + S + C) | large jaxpr with many transforms/options | full string materialization (mitigated by streaming hash path) |
+| E-graph node pool | `fj-egraph` (egg internals) | O(N_nodes) unbounded | complex programs with many rewrite opportunities | egg's internal union-find; saturation may grow exponentially |
+| Durability symbol records | `fj-conformance` | O(T) where T = symbols | large artifacts with many source blocks | Vec of SidecarSymbolRecord with base64-encoded data |
+
+### 20.3 Identified Hotspot Families (Rust Implementation)
+
+**Family R-H1: Shape manipulation kernel inner loops**
+- Components: `eval_transpose`, `eval_broadcast_in_dim`, `eval_concatenate` in `fj-lax`
+- Pattern: per-element coordinate computation with O(R) work per element
+- Transpose: O(N * R) for stride-based index remapping (`fj-lax/src/lib.rs:603-626`)
+- BroadcastInDim: O(N * R) for coordinate-to-flat-index conversion (`fj-lax/src/lib.rs:724-745`)
+- Concatenate: O(N * E_in) linear search to locate source tensor per element (`fj-lax/src/lib.rs:843-850`)
+- Optimization opportunity: precompute stride tables, use block copy for contiguous regions
+
+**Family R-H2: Vmap execution multiplier**
+- Components: `execute_vmap` in `fj-dispatch`
+- Pattern: full program evaluation repeated L times (leading dimension)
+- Cost: O(L * E * K_max) where inner cost inherits from interpreter + primitives (`fj-dispatch/src/lib.rs:262-352`)
+- Memory: O(L * V) intermediate values held until final stacking
+- Optimization opportunity: batched primitive evaluation, lazy tensor slicing
+
+**Family R-H3: AD tape and backward pass**
+- Components: `forward_with_tape`, `backward` in `fj-ad`
+- Pattern: forward records all intermediate values; backward reverses with adjoint accumulation
+- Cost: forward O(E * K_max), backward O(E * K * log V) from BTreeMap operations (`fj-ad/src/lib.rs:49-143`)
+- Memory: tape clones input values at every equation (`fj-ad/src/lib.rs:98`)
+- Optimization opportunity: arena allocation for tape entries, COW value semantics
+
+**Family R-H4: Tensor materialization and copying**
+- Components: `TensorValue` construction and `stack_axis0` in `fj-core`
+- Pattern: all operations produce fully materialized dense tensor outputs
+- Cost: O(N) allocation per elementwise op; O(L * N) for vmap stacking (`fj-core/src/lib.rs:273-277, 364-409`)
+- Memory: no sharing between input and output tensors; repeated clone/extend calls
+- Optimization opportunity: view/slice semantics, copy-on-write tensor storage
+
+**Family R-H5: Cache key and fingerprint computation**
+- Components: `build_cache_key_ref`, `hash_canonical_payload_ref`, `canonical_fingerprint` in `fj-cache` and `fj-core`
+- Pattern: string serialization of full IR + SHA-256 hashing
+- Cost: O(E + S + C) per dispatch; amortized O(1) for fingerprint via OnceLock (`fj-cache/src/lib.rs:112-154`, `fj-core/src/lib.rs:620-648`)
+- Memory: canonical payload string allocation on non-streaming path
+- Current mitigation: streaming hash variant (`hash_canonical_payload_ref`) avoids full string materialization
+
+**Family R-H6: E-graph saturation risk**
+- Components: `optimize_jaxpr` in `fj-egraph`
+- Pattern: egg equality saturation with algebraic rewrite rules
+- Cost: O(M * (E + R)^2) worst case; M = saturation iterations, R = 8 rewrite rules
+- Memory: e-graph node pool grows with rewrites; worst case unbounded
+- Current mitigation: not yet wired into dispatch path; isolated optimization sandbox
+
+### 20.4 Complexity Scaling Under Transform Composition
+
+| Composition | Time scaling | Memory scaling | Dominant hotspot family |
+|---|---|---|---|
+| `eval(f)` | O(E * K_max) | O(V) env | R-H4 (tensor materialization) |
+| `jit(f)` cache miss | O(E + S + C) hash + O(E * K_max) eval | O(V) + O(E + S + C) key | R-H5 (cache) + R-H4 |
+| `jit(f)` cache hit | O(E + S + C) hash + O(1) | O(E + S + C) key | R-H5 |
+| `grad(f)` | O(E * K_max) forward + O(E * K * log V) backward | O(E * K) tape + O(V) adjoints | R-H3 (tape/backward) |
+| `vmap(f)` | O(L * E * K_max) | O(L * V) intermediates + O(L * N) stacking | R-H2 (vmap multiplier) |
+| `vmap(grad(f))` | O(L * (E * K_max + E * K * log V)) | O(L * (E * K + V)) | R-H2 x R-H3 |
+| `jit(vmap(grad(f)))` miss | O(E+S+C) + O(L * (2 * E * K_max)) | O(L * (E * K + V)) + key | R-H2 x R-H3 x R-H5 |
+
+### 20.5 Legacy-to-Rust Complexity Correspondence
+
+| Legacy pattern | Legacy complexity | Rust equivalent | Rust complexity | Parity note |
+|---|---|---|---|---|
+| `eval_jaxpr` with dead-var cleanup | O(E) with inline GC | `eval_jaxpr_with_consts` without dead-var cleanup | O(E * K_max) | Rust env grows monotonically; dead-var cleanup is a future optimization |
+| `trace_to_jaxpr` tracer accumulation | O(ops) with all tracers stored | `build_closed_jaxpr` | O(E * K * log E) | BTreeMap overhead vs Python dict; similar growth pattern |
+| `linearize_jaxpr` with weakref cache | O(ops) cached | `forward_with_tape` + `backward` | O(E * K_max + E * K * log V) | no linearization caching yet; tape approach is direct |
+| `cache_key.get` with deepcopy | O(S + C) | `hash_canonical_payload_ref` streaming | O(E + S + C) | streaming hash avoids deepcopy; string fingerprint substitutes for IR serialization |
+| `dce_jaxpr` reverse pass | O(E * K) | `dead_code_eliminate` | O(E * K) | similar reverse-pass pattern |
+| `process_call` residual forwarding | O(n * m) with substitution | `partial_eval_jaxpr` single-pass | O(E * K) | no nested call splitting yet; simpler but less optimized |
+
+### 20.6 Performance Budget Crosswalk
+
+Hotspot families map to provisional budgets from EXHAUSTIVE_LEGACY_ANALYSIS.md section 8:
+
+| Budget target | Hotspot families affected | Measurement method |
+|---|---|---|
+| Transform composition overhead <= +10% | R-H2 (vmap), R-H3 (AD) | `FJ-P2C-001..003` sentinel workloads |
+| Cache hit path p95 <= +8% | R-H5 (cache key) | `FJ-P2C-005` cache-key churn workloads |
+| p99 regression <= +10% | R-H1 (shape ops), R-H4 (tensor copy) | `FJ-P2C-008` lax primitive throughput |
+| Peak RSS regression <= +10% | R-H2 (vmap intermediates), R-H3 (AD tape), R-H4 (tensor materialization) | peak RSS under sentinel composition workloads |
+
+These budgets are pending empirical calibration against first benchmark cycle (see EXHAUSTIVE_LEGACY_ANALYSIS.md section 15 optimization governance).

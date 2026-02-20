@@ -385,3 +385,87 @@ Execution-path sections in this document are explicitly tied to:
 - `bd-3dl.12.7` (E2E replay/forensics),
 - `bd-3dl.23.10` (docs-to-test/logging crosswalk),
 - `bd-3dl.23.11` and `bd-3dl.23.12` (integrated draft passes).
+
+## 20. Complexity, Performance, and Memory Characterization (DOC-PASS-05)
+
+### 20.1 Legacy Algorithmic Complexity Classes
+
+| Legacy subsystem | Primary function | Complexity class | Key dimension | Code anchor |
+|---|---|---|---|---|
+| Jaxpr evaluation | `core.py:eval_jaxpr` | O(E) | E = equations | `jax/_src/core.py:729-754` |
+| Dead variable cleanup | `core.py:clean_up_dead_vars` | O(k) per equation | k = dead vars per step | `jax/_src/core.py:4002-4008` |
+| Last-used analysis | `core.py:last_used` | O(E * K) | K = avg equation arity | `jax/_src/core.py:3992-4000` |
+| Tracer leak detection | `core.py` gc scan | O(heap) | gc-reachable objects | `jax/_src/core.py:1495-1569` |
+| Partial-eval trace | `partial_eval.py:trace_to_jaxpr` | O(ops) | ops = traced operations | `jax/_src/interpreters/partial_eval.py:525-596` |
+| Partial-eval call split | `partial_eval.py:process_call` | O(n * m) | n = inputs, m = nesting | `jax/_src/interpreters/partial_eval.py:216-270` |
+| Dead code elimination | `partial_eval.py:dce_jaxpr` | O(E * K) | E = equations, K = outputs | `jax/_src/interpreters/partial_eval.py:1411-1510` |
+| AD linearization | `ad.py:linearize_jaxpr` | O(ops) | traced operations | `jax/_src/interpreters/ad.py:148-224` |
+| Batch processing | `batching.py:process_primitive` | O(K) per primitive | K = input count | `jax/_src/interpreters/batching.py:244-250` |
+| Cache key derivation | `cache_key.py:get` | O(S) | S = serialized IR size | `jax/_src/cache_key.py:75-149` |
+| Cache key deepcopy | `cache_key.py:_hash_serialized_compile_options` | O(C) | C = CompileOptions size | `jax/_src/cache_key.py:277-331` |
+| Cache executable I/O | `compilation_cache.py` get/put | O(X) | X = executable size | `jax/_src/compilation_cache.py:276-351` |
+| IR tree walk | `compiler.py:_walk_operations` | O(N) | N = IR nodes | `jax/_src/compiler.py:80-90` |
+| Dispatch primitive | `dispatch.py:apply_primitive` | O(1) cached | per-primitive cache | `jax/_src/dispatch.py:84-94` |
+
+### 20.2 Legacy Memory Growth Patterns
+
+| Growth driver | Component | Growth formula | Peak trigger | Mitigation in legacy |
+|---|---|---|---|---|
+| Tracer accumulation | `partial_eval.py`, `core.py` | O(T) where T = total tracers | complex nested traces | dead variable cleanup during eval |
+| Residual forwarding | `partial_eval.py:process_call` | O(R * D) where R = residuals, D = call nesting depth | nested transform compositions | substitution-list forwarding optimization |
+| AD dual jaxprs | `ad.py:linearize_jaxpr` | O(E) primal + O(E) tangent | large programs under `grad` | `@weakref_lru_cache` on linearization result |
+| Cache key serialization | `cache_key.py:get` | O(S) full IR serialization | large MLIR modules | conditional canonicalization via config flag |
+| CompileOptions deepcopy | `cache_key.py:281` | O(C) per cache lookup | frequent cache miss paths | none (known cost accepted) |
+| Compilation cache entries | `compilation_cache.py` | O(M * X_avg) where M = max_size | many distinct compilations | LRU eviction with configurable max_size |
+| Executable deserialization | `compilation_cache.py:290-294` | O(X) per cache hit | large compiled executables | zstandard/zlib compression |
+
+### 20.3 Legacy Hotspot Families
+
+**Family H1: Trace-to-IR construction path**
+- Location: `core.py:eval_jaxpr`, `partial_eval.py:trace_to_jaxpr`, `partial_eval.py:process_call`
+- Pattern: sequential equation processing with environment management
+- Dominant cost: linear in program size, but residual forwarding in nested calls can compound to O(n^2) through substitution-list chaining
+- Memory peak: all tracers stored until jaxpr conversion
+
+**Family H2: Cache key computation path**
+- Location: `cache_key.py:get`, `cache_key.py:_hash_serialized_compile_options`, `cache_key.py:_canonicalize_ir`
+- Pattern: full IR serialization + deep copy of compile options + tree walk for callback removal
+- Dominant cost: O(S) where S = serialized IR module size; deepcopy adds constant-factor overhead
+- Memory peak: cloned MLIR module + deepcopied CompileOptions held simultaneously
+
+**Family H3: Transform composition path**
+- Location: `ad.py:linearize_jaxpr`, `batching.py:process_primitive`, `partial_eval.py:process_map`
+- Pattern: each transform layer wraps/rewrites the program representation
+- Dominant cost: multiplicative with transform stack depth (grad adds backward pass, vmap adds per-slice iteration)
+- Memory peak: dual jaxpr (primal + tangent) under grad, plus residual lists
+
+**Family H4: DCE and post-trace optimization**
+- Location: `partial_eval.py:dce_jaxpr`
+- Pattern: reverse pass through equations checking output liveness
+- Dominant cost: O(E * K) reverse traversal
+- Memory peak: filtered equation lists and used-variable sets
+
+**Family H5: Compilation and executable cache I/O**
+- Location: `compilation_cache.py:get_executable_and_time`, `compilation_cache.py:put_executable_and_time`
+- Pattern: serialization/deserialization + compression/decompression of compiled executables
+- Dominant cost: O(X) where X = executable size; compression adds constant factor
+- Memory peak: compressed + decompressed forms held during transition
+
+### 20.4 Complexity Scaling Laws (Legacy)
+
+Transform composition multiplies base evaluation cost:
+- `jit` alone: 1x base trace + compilation
+- `grad(f)`: 2x base (forward pass + backward pass), plus residual memory
+- `vmap(f)`: L x base where L = leading dimension
+- `vmap(grad(f))`: L x 2x base (each vmap slice runs full grad)
+- Nested `jit(grad(f))`: cache miss = trace + grad + compile; cache hit = O(1) dispatch
+
+### 20.5 Performance Budget Anchors (From Section 8)
+
+Provisional budgets from section 8 (pending empirical calibration):
+- transform composition overhead regression: <= +10%
+- cache hit path p95 regression: <= +8%
+- p99 regression: <= +10%
+- peak RSS regression: <= +10%
+
+These budgets apply to the Rust implementation relative to equivalent legacy workload classes and must be validated against hotspot families H1-H5 above.

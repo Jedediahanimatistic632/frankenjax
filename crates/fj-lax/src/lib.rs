@@ -986,6 +986,180 @@ mod tests {
     }
 
     // ===================================================================
+    // Axis-aware reduction tests
+    // ===================================================================
+
+    fn axes_params(axes: &str) -> BTreeMap<String, String> {
+        let mut p = BTreeMap::new();
+        p.insert("axes".into(), axes.into());
+        p
+    }
+
+    #[test]
+    fn reduce_sum_axis0_rank2() {
+        // [[1,2,3],[4,5,6]] shape [2,3] -> reduce axis 0 -> [5,7,9] shape [3]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(1), Literal::I64(2), Literal::I64(3),
+                    Literal::I64(4), Literal::I64(5), Literal::I64(6),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::ReduceSum, &[input], &axes_params("0")).unwrap();
+        let expected = Value::vector_i64(&[5, 7, 9]).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn reduce_sum_axis1_rank2() {
+        // [[1,2,3],[4,5,6]] shape [2,3] -> reduce axis 1 -> [6,15] shape [2]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(1), Literal::I64(2), Literal::I64(3),
+                    Literal::I64(4), Literal::I64(5), Literal::I64(6),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::ReduceSum, &[input], &axes_params("1")).unwrap();
+        let expected = Value::vector_i64(&[6, 15]).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn reduce_sum_both_axes_rank2() {
+        // reducing both axes should give full reduction (scalar)
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(1), Literal::I64(2), Literal::I64(3),
+                    Literal::I64(4), Literal::I64(5), Literal::I64(6),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::ReduceSum, &[input], &axes_params("0,1")).unwrap();
+        assert_eq!(out, Value::scalar_i64(21));
+    }
+
+    #[test]
+    fn reduce_max_axis0_rank2() {
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(1), Literal::I64(5), Literal::I64(3),
+                    Literal::I64(4), Literal::I64(2), Literal::I64(6),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::ReduceMax, &[input], &axes_params("0")).unwrap();
+        let expected = Value::vector_i64(&[4, 5, 6]).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn reduce_min_axis1_rank2() {
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(3), Literal::I64(1), Literal::I64(5),
+                    Literal::I64(6), Literal::I64(2), Literal::I64(4),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::ReduceMin, &[input], &axes_params("1")).unwrap();
+        let expected = Value::vector_i64(&[1, 2]).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn reduce_prod_axis0_rank2() {
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(1), Literal::I64(2), Literal::I64(3),
+                    Literal::I64(4), Literal::I64(5), Literal::I64(6),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::ReduceProd, &[input], &axes_params("0")).unwrap();
+        let expected = Value::vector_i64(&[4, 10, 18]).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn reduce_sum_axis_out_of_bounds() {
+        let input = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let err = eval_primitive(Primitive::ReduceSum, &[input], &axes_params("1")).unwrap_err();
+        assert!(matches!(err, EvalError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn reduce_sum_axis0_rank3() {
+        // shape [2,2,2] with values [1..8], reduce axis 0 -> shape [2,2]
+        // [[1,2],[3,4]] + [[5,6],[7,8]] = [[6,8],[10,12]]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2, 2] },
+                (1..=8).map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::ReduceSum, &[input], &axes_params("0")).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![2, 2]);
+            let values: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(values, vec![6, 8, 10, 12]);
+        } else {
+            panic!("expected tensor output");
+        }
+    }
+
+    #[test]
+    fn reduce_sum_f64_axis0() {
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::from_f64(1.0), Literal::from_f64(2.0), Literal::from_f64(3.0),
+                    Literal::from_f64(4.0), Literal::from_f64(5.0), Literal::from_f64(6.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::ReduceSum, &[input], &axes_params("0")).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![3]);
+            let values: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert!((values[0] - 5.0).abs() < 1e-10);
+            assert!((values[1] - 7.0).abs() < 1e-10);
+            assert!((values[2] - 9.0).abs() < 1e-10);
+        } else {
+            panic!("expected tensor output");
+        }
+    }
+
+    // ===================================================================
     // Tensor manipulation edge cases
     // ===================================================================
 

@@ -33,13 +33,17 @@
 
 pub mod buffer;
 pub mod call;
+pub mod callback;
 pub mod error;
+pub mod marshal;
 pub mod registry;
 
 // Re-exports for convenience
 pub use buffer::FfiBuffer;
 pub use call::FfiCall;
+pub use callback::{CallbackFlavor, CallbackRegistry, FfiCallback};
 pub use error::FfiError;
+pub use marshal::{buffer_to_value, value_to_buffer};
 pub use registry::{FfiFnPtr, FfiRegistry, FfiTarget};
 
 #[cfg(test)]

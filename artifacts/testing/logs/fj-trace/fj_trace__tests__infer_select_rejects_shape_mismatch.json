@@ -1,7 +1,7 @@
 {
   "schema_version": "frankenjax.test-log.v1",
-  "test_id": "fj_trace::tests::nested_trace_contexts_can_open_and_close",
-  "fixture_id": "8156f138a4ea274a40e467882fa81c3bc052fdaa1cdfc0bab0228477f9aab5d7",
+  "test_id": "fj_trace::tests::infer_select_rejects_shape_mismatch",
+  "fixture_id": "d8e095ee9816d331e6b0684aad505e69671d2187164da12fa4f01a41ade1beb1",
   "seed": null,
   "mode": "strict",
   "env": {
@@ -12,8 +12,8 @@
   },
   "artifact_refs": [
     "packet:FJ-P2C-001",
-    "replay: cargo test -p fj-trace --lib fj_trace::tests::nested_trace_contexts_can_open_and_close -- --exact --nocapture",
-    "/data/projects/frankenjax/crates/fj-trace/../../artifacts/testing/logs/fj-trace/fj_trace__tests__nested_trace_contexts_can_open_and_close.json"
+    "replay: cargo test -p fj-trace --lib fj_trace::tests::infer_select_rejects_shape_mismatch -- --exact --nocapture",
+    "/data/projects/frankenjax/crates/fj-trace/../../artifacts/testing/logs/fj-trace/fj_trace__tests__infer_select_rejects_shape_mismatch.json"
   ],
   "result": "pass",
   "duration_ms": 61,

@@ -1,10 +1,10 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use fj_cache::{
     CacheKeyInput, CacheKeyInputRef, CacheManager, build_cache_key, build_cache_key_ref,
 };
 use fj_core::{CompatibilityMode, Jaxpr, ProgramSpec, Transform, build_program};
 use std::collections::BTreeMap;
+use std::hint::black_box;
 
 fn empty_jaxpr() -> Jaxpr {
     Jaxpr::new(vec![], vec![], vec![], vec![])

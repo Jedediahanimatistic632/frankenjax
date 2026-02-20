@@ -457,8 +457,12 @@ fn vjp(
         Primitive::Logistic => {
             // d/dx σ(x) = σ(x)(1-σ(x))
             let x = &inputs[0];
-            let sig = eval_primitive(Primitive::Logistic, std::slice::from_ref(x), &BTreeMap::new())
-                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let sig = eval_primitive(
+                Primitive::Logistic,
+                std::slice::from_ref(x),
+                &BTreeMap::new(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
             let one_minus_sig = value_sub(&ones_like(x), &sig)?;
             let factor = value_mul(&sig, &one_minus_sig)?;
             Ok(vec![value_mul(g, &factor)?])
@@ -604,8 +608,9 @@ fn vjp(
                     .collect::<Vec<_>>()
                     .join(","),
             );
-            let reshaped_g = eval_primitive(Primitive::Reshape, std::slice::from_ref(g), &reshape_params)
-                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let reshaped_g =
+                eval_primitive(Primitive::Reshape, std::slice::from_ref(g), &reshape_params)
+                    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
             Ok(vec![reshaped_g])
         }
         Primitive::Transpose => {
@@ -650,8 +655,12 @@ fn vjp(
             };
             // If input was scalar, sum everything
             if input_shape.rank() == 0 {
-                let reduced = eval_primitive(Primitive::ReduceSum, std::slice::from_ref(g), &BTreeMap::new())
-                    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+                let reduced = eval_primitive(
+                    Primitive::ReduceSum,
+                    std::slice::from_ref(g),
+                    &BTreeMap::new(),
+                )
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
                 return Ok(vec![reduced]);
             }
             // Otherwise, just pass g through (simplified)

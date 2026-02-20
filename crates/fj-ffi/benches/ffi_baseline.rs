@@ -3,9 +3,9 @@
 #![allow(unsafe_code)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use fj_core::{DType, Literal, Shape, TensorValue, Value};
 use fj_ffi::{FfiBuffer, FfiCall, FfiRegistry, buffer_to_value, value_to_buffer};
+use std::hint::black_box;
 
 unsafe extern "C" fn ffi_double(
     inputs: *const *const u8,

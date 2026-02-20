@@ -856,7 +856,8 @@ fn metamorphic_abs_idempotent() {
     // abs(abs(x)) == abs(x)
     for x in [-42i64, -1, 0, 1, 42] {
         let abs1 = eval_primitive(Primitive::Abs, &[Value::scalar_i64(x)], &no_params()).unwrap();
-        let abs2 = eval_primitive(Primitive::Abs, std::slice::from_ref(&abs1), &no_params()).unwrap();
+        let abs2 =
+            eval_primitive(Primitive::Abs, std::slice::from_ref(&abs1), &no_params()).unwrap();
         assert_eq!(abs1, abs2, "abs(abs({x})) should be abs({x})");
     }
 }

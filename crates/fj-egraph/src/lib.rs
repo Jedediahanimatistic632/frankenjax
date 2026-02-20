@@ -61,20 +61,58 @@ impl CostFunction<FjLang> for OpCount {
 /// Standard algebraic rewrite rules for FjLang.
 pub fn algebraic_rules() -> Vec<egg::Rewrite<FjLang, ()>> {
     vec![
-        // Commutativity
+        // ── Commutativity ────────────────────────────────────────────
         rewrite!("add-comm"; "(add ?a ?b)" => "(add ?b ?a)"),
         rewrite!("mul-comm"; "(mul ?a ?b)" => "(mul ?b ?a)"),
-        // Identity
-        rewrite!("add-zero"; "(add ?a 0)" => "?a"),
-        rewrite!("mul-one"; "(mul ?a 1)" => "?a"),
-        // Annihilation
-        rewrite!("mul-zero"; "(mul ?a 0)" => "0"),
-        // Associativity
+        rewrite!("max-comm"; "(max ?a ?b)" => "(max ?b ?a)"),
+        rewrite!("min-comm"; "(min ?a ?b)" => "(min ?b ?a)"),
+        // ── Associativity ────────────────────────────────────────────
         rewrite!("add-assoc"; "(add (add ?a ?b) ?c)" => "(add ?a (add ?b ?c))"),
         rewrite!("mul-assoc"; "(mul (mul ?a ?b) ?c)" => "(mul ?a (mul ?b ?c))"),
-        // Distributivity
+        rewrite!("max-assoc"; "(max (max ?a ?b) ?c)" => "(max ?a (max ?b ?c))"),
+        rewrite!("min-assoc"; "(min (min ?a ?b) ?c)" => "(min ?a (min ?b ?c))"),
+        // ── Additive identity / annihilation ─────────────────────────
+        rewrite!("add-zero"; "(add ?a 0)" => "?a"),
+        rewrite!("sub-zero"; "(sub ?a 0)" => "?a"),
+        rewrite!("sub-self"; "(sub ?a ?a)" => "0"),
+        rewrite!("sub-to-add-neg"; "(sub ?a ?b)" => "(add ?a (neg ?b))"),
+        // ── Multiplicative identity / annihilation ───────────────────
+        rewrite!("mul-one"; "(mul ?a 1)" => "?a"),
+        rewrite!("mul-zero"; "(mul ?a 0)" => "0"),
+        rewrite!("mul-neg-one"; "(mul ?a (neg 1))" => "(neg ?a)"),
+        // ── Distributivity ───────────────────────────────────────────
         rewrite!("distribute"; "(mul ?a (add ?b ?c))" => "(add (mul ?a ?b) (mul ?a ?c))"),
         rewrite!("factor"; "(add (mul ?a ?b) (mul ?a ?c))" => "(mul ?a (add ?b ?c))"),
+        // ── Negation ─────────────────────────────────────────────────
+        rewrite!("neg-neg"; "(neg (neg ?a))" => "?a"),
+        rewrite!("neg-zero"; "(neg 0)" => "0"),
+        rewrite!("add-neg-self"; "(add ?a (neg ?a))" => "0"),
+        // ── Abs idempotence ──────────────────────────────────────────
+        rewrite!("abs-abs"; "(abs (abs ?a))" => "(abs ?a)"),
+        rewrite!("abs-neg"; "(abs (neg ?a))" => "(abs ?a)"),
+        // ── Max / Min idempotence ────────────────────────────────────
+        rewrite!("max-self"; "(max ?a ?a)" => "?a"),
+        rewrite!("min-self"; "(min ?a ?a)" => "?a"),
+        // ── Power rules ──────────────────────────────────────────────
+        rewrite!("pow-zero"; "(pow ?a 0)" => "1"),
+        rewrite!("pow-one"; "(pow ?a 1)" => "?a"),
+        // ── Exp / Log inverse pair ───────────────────────────────────
+        rewrite!("exp-log"; "(exp (log ?a))" => "?a"),
+        rewrite!("log-exp"; "(log (exp ?a))" => "?a"),
+        // ── Sqrt / Rsqrt relationships ───────────────────────────────
+        rewrite!("rsqrt-to-sqrt"; "(rsqrt ?a)" => "(pow (sqrt ?a) (neg 1))"),
+        // ── Floor / Ceil / Round idempotence ─────────────────────────
+        rewrite!("floor-floor"; "(floor (floor ?a))" => "(floor ?a)"),
+        rewrite!("ceil-ceil"; "(ceil (ceil ?a))" => "(ceil ?a)"),
+        rewrite!("round-round"; "(round (round ?a))" => "(round ?a)"),
+        // ── Reduction idempotence (scalar results) ───────────────────
+        rewrite!("reduce-sum-sum"; "(reduce_sum (reduce_sum ?a))" => "(reduce_sum ?a)"),
+        rewrite!("reduce-max-max"; "(reduce_max (reduce_max ?a))" => "(reduce_max ?a)"),
+        rewrite!("reduce-min-min"; "(reduce_min (reduce_min ?a))" => "(reduce_min ?a)"),
+        rewrite!("reduce-prod-prod"; "(reduce_prod (reduce_prod ?a))" => "(reduce_prod ?a)"),
+        // ── Trig negation rules ──────────────────────────────────────
+        rewrite!("sin-neg"; "(sin (neg ?a))" => "(neg (sin ?a))"),
+        rewrite!("cos-neg"; "(cos (neg ?a))" => "(cos ?a)"),
     ]
 }
 
@@ -735,6 +773,223 @@ mod tests {
 
         let cos: RecExpr<FjLang> = "(cos 1)".parse().unwrap();
         assert!(!cos.as_ref().is_empty());
+    }
+
+    #[test]
+    fn neg_neg_simplification() {
+        // neg(neg(x)) should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        // Double negation should be eliminated
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "neg(neg(x)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+
+        // Verify correctness
+        let orig_out = eval_jaxpr(&jaxpr, &[Value::scalar_i64(7)]).unwrap();
+        let opt_out = eval_jaxpr(&optimized, &[Value::scalar_i64(7)]).unwrap();
+        assert_eq!(orig_out, opt_out);
+    }
+
+    #[test]
+    fn sub_self_simplification() {
+        // x - x should simplify (fewer or equal equations)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        // The optimizer should recognize sub(x,x) = 0 and simplify
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "sub(x,x) should not increase equation count"
+        );
+    }
+
+    #[test]
+    fn exp_log_inverse() {
+        // exp(log(x)) should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Exp,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "exp(log(x)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn abs_idempotent() {
+        // abs(abs(x)) should simplify to abs(x)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Abs,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Abs,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "abs(abs(x)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+
+        // Verify correctness for negative input
+        let orig_out = eval_jaxpr(&jaxpr, &[Value::scalar_i64(-5)]).unwrap();
+        let opt_out = eval_jaxpr(&optimized, &[Value::scalar_i64(-5)]).unwrap();
+        assert_eq!(orig_out, opt_out);
+    }
+
+    #[test]
+    fn max_min_self_simplification() {
+        // max(x, x) should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Max,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        let orig_out = eval_jaxpr(&jaxpr, &[Value::scalar_i64(42)]).unwrap();
+        let opt_out = eval_jaxpr(&optimized, &[Value::scalar_i64(42)]).unwrap();
+        assert_eq!(orig_out, opt_out);
+    }
+
+    #[test]
+    fn floor_idempotent() {
+        // floor(floor(x)) should simplify to floor(x)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Floor,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Floor,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "floor(floor(x)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn add_zero_identity() {
+        // x + 0 should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(0))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        // After add-zero rule, should have no equations (just pass-through)
+        assert!(
+            optimized.equations.is_empty(),
+            "x+0 should simplify to x: got {} eqns",
+            optimized.equations.len(),
+        );
+    }
+
+    #[test]
+    fn algebraic_rules_count() {
+        let rules = algebraic_rules();
+        assert!(
+            rules.len() >= 30,
+            "expected at least 30 rewrite rules, got {}",
+            rules.len(),
+        );
     }
 
     #[test]

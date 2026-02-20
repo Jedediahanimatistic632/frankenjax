@@ -454,6 +454,167 @@ mod tests {
         }
     }
 
+    // ── Key Sensitivity: each field change → different key ────────
+
+    fn baseline_input() -> CacheKeyInput {
+        CacheKeyInput {
+            mode: CompatibilityMode::Strict,
+            backend: "cpu".to_owned(),
+            jaxpr: empty_jaxpr(),
+            transform_stack: vec![Transform::Jit],
+            compile_options: BTreeMap::new(),
+            custom_hook: Some("hook".to_owned()),
+            unknown_incompatible_features: vec![],
+        }
+    }
+
+    fn key_hex(input: &CacheKeyInput) -> String {
+        build_cache_key(input).unwrap().digest_hex
+    }
+
+    #[test]
+    fn key_sensitivity_mode_change() {
+        let mut alt = baseline_input();
+        alt.mode = CompatibilityMode::Hardened;
+        assert_ne!(key_hex(&baseline_input()), key_hex(&alt));
+    }
+
+    #[test]
+    fn key_sensitivity_backend_change() {
+        let mut alt = baseline_input();
+        alt.backend = "gpu".to_owned();
+        assert_ne!(key_hex(&baseline_input()), key_hex(&alt));
+    }
+
+    #[test]
+    fn key_sensitivity_transform_stack_change() {
+        let mut alt = baseline_input();
+        alt.transform_stack = vec![Transform::Grad];
+        assert_ne!(key_hex(&baseline_input()), key_hex(&alt));
+    }
+
+    #[test]
+    fn key_sensitivity_compile_options_change() {
+        let mut alt = baseline_input();
+        alt.compile_options
+            .insert("opt_level".to_owned(), "3".to_owned());
+        assert_ne!(key_hex(&baseline_input()), key_hex(&alt));
+    }
+
+    #[test]
+    fn key_sensitivity_custom_hook_change() {
+        let mut alt = baseline_input();
+        alt.custom_hook = Some("different-hook".to_owned());
+        assert_ne!(key_hex(&baseline_input()), key_hex(&alt));
+    }
+
+    #[test]
+    fn key_sensitivity_custom_hook_none_vs_some() {
+        let mut alt = baseline_input();
+        alt.custom_hook = None;
+        assert_ne!(key_hex(&baseline_input()), key_hex(&alt));
+    }
+
+    #[test]
+    fn key_sensitivity_jaxpr_change() {
+        let mut alt = baseline_input();
+        alt.jaxpr = fj_core::build_program(fj_core::ProgramSpec::Add2);
+        assert_ne!(key_hex(&baseline_input()), key_hex(&alt));
+    }
+
+    // ── Compatibility Matrix Row ────────────────────────────────────
+
+    #[test]
+    fn compatibility_matrix_row_format() {
+        use super::compatibility_matrix_row;
+
+        let input = CacheKeyInput {
+            mode: CompatibilityMode::Strict,
+            backend: "cpu".to_owned(),
+            jaxpr: empty_jaxpr(),
+            transform_stack: vec![],
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        };
+        let row = compatibility_matrix_row(&input);
+        assert!(row.contains("mode=Strict"));
+        assert!(row.contains("backend=cpu"));
+        assert!(row.contains("unknown_features="));
+    }
+
+    #[test]
+    fn compatibility_matrix_row_with_features() {
+        use super::compatibility_matrix_row;
+
+        let input = CacheKeyInput {
+            mode: CompatibilityMode::Hardened,
+            backend: "tpu".to_owned(),
+            jaxpr: empty_jaxpr(),
+            transform_stack: vec![],
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec!["feat_a".to_owned(), "feat_b".to_owned()],
+        };
+        let row = compatibility_matrix_row(&input);
+        assert!(row.contains("mode=Hardened"));
+        assert!(row.contains("backend=tpu"));
+        assert!(row.contains("feat_a;feat_b"));
+    }
+
+    // ── Property Test: distinct inputs → distinct keys ──────────────
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(
+            fj_test_utils::property_test_case_count()
+        ))]
+        #[test]
+        fn prop_distinct_backends_produce_distinct_keys(
+            a in "[a-z]{3,6}",
+            b in "[a-z]{3,6}",
+        ) {
+            let _seed = fj_test_utils::capture_proptest_seed();
+            prop_assume!(a != b);
+            let input_a = CacheKeyInput {
+                mode: CompatibilityMode::Hardened,
+                backend: a,
+                jaxpr: empty_jaxpr(),
+                transform_stack: vec![],
+                compile_options: BTreeMap::new(),
+                custom_hook: None,
+                unknown_incompatible_features: vec![],
+            };
+            let input_b = CacheKeyInput {
+                mode: CompatibilityMode::Hardened,
+                backend: b,
+                jaxpr: empty_jaxpr(),
+                transform_stack: vec![],
+                compile_options: BTreeMap::new(),
+                custom_hook: None,
+                unknown_incompatible_features: vec![],
+            };
+            let key_a = build_cache_key(&input_a).expect("key gen a");
+            let key_b = build_cache_key(&input_b).expect("key gen b");
+            prop_assert_ne!(key_a, key_b);
+        }
+    }
+
+    // ── Persistence Wire Format Integration ─────────────────────────
+
+    #[test]
+    fn persistence_round_trip_preserves_data() {
+        use super::persistence::{deserialize, serialize};
+        use super::backend::CachedArtifact;
+
+        let artifact = CachedArtifact {
+            data: b"test_computation_result".to_vec(),
+            integrity_sha256_hex: super::sha256_hex(b"test_computation_result"),
+        };
+        let wire = serialize(&artifact);
+        let restored = deserialize(&wire).expect("should deserialize");
+        assert_eq!(restored.data, artifact.data);
+    }
+
     // ── CacheManager integration tests ─────────────────────────────
 
     #[test]

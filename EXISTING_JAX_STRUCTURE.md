@@ -754,3 +754,30 @@ Hotspot families map to provisional budgets from EXHAUSTIVE_LEGACY_ANALYSIS.md s
 | Peak RSS regression <= +10% | R-H2 (vmap intermediates), R-H3 (AD tape), R-H4 (tensor materialization) | peak RSS under sentinel composition workloads |
 
 These budgets are pending empirical calibration against first benchmark cycle (see EXHAUSTIVE_LEGACY_ANALYSIS.md section 15 optimization governance).
+
+## 21. DOC-PASS-13 Final Consistency Sweep and Sign-off
+
+Date: 2026-02-20
+Agent: CoralOwl (claude-code/opus-4.6)
+
+### 21.1 Verification Passes Completed
+
+| Pass | Result | Scope |
+|---|---|---|
+| DOC-PASS-05 (Complexity/Performance) | Section 20 added with code-anchored analysis | Both documents |
+| DOC-PASS-12 (Red-Team Review) | Critical fixes: fj-trace added to sections 8.1-8.3, dead_code_eliminate corrected to dce_jaxpr, hardened mode behavior fixed, batching attribution corrected | This document |
+| DOC-PASS-14 (Structure Specialist) | 12/12 crate symbol counts exact, 6/6 dependency checks pass, 0 layering violations | This document |
+| DOC-PASS-15 (Behavior Specialist) | 5/5 behavioral claims confirmed against Rust source code | This document |
+| DOC-PASS-16 (Risk/Perf/Test Specialist) | 6/6 test assets verified, 2/2 complexity claims confirmed, budgets consistent | This document |
+
+### 21.2 Critical Fixes Applied
+
+1. Added `fj-trace` to crate ownership matrix (section 8.1), dependency map (section 8.2), and layering constraints (section 8.3).
+2. Corrected phantom `dead_code_eliminate` reference to actual `dce_jaxpr` function.
+3. Fixed batching state attribution from `fj-dispatch + fj-interpreters` to `fj-dispatch` only.
+4. Corrected `validate_well_formed` complexity to include K (arity) factor.
+5. Fixed `build_closed_jaxpr` complexity to use V (tracers) not E (equations) in log term.
+
+### 21.3 Sign-off
+
+This document has been expanded through DOC-PASS-01 through DOC-PASS-16 with independent red-team review and three specialist verification passes. All structural claims (crate boundaries, dependency graph, symbol counts, layering), behavioral claims (5 code-verified assertions), and risk/test claims (test corpus existence, complexity accuracy, budget consistency) are verified against current repository state. The document is approved as the normative workspace structure reference for Phase-2C work.

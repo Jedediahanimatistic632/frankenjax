@@ -1,0 +1,407 @@
+{
+  "schema_version": "frankenjax.contract-table.v1",
+  "packet_id": "FJ-P2C-006",
+  "generated_at_unix_ms": 1771589460000,
+  "mode_matrix": [
+    {
+      "mode": "strict",
+      "contract_rows": [
+        {
+          "row_id": "p2c006.strict.inv001",
+          "title": "CPU backend is always available as the baseline execution backend",
+          "preconditions": [
+            "FrankenJAX runtime is initialized",
+            "DispatchRequest has been constructed"
+          ],
+          "guarantees": [
+            "backend='cpu' never fails due to backend unavailability",
+            "eval_jaxpr interprets all supported primitives on CPU without external dependencies",
+            "No CUDA, ROCm, or TPU runtime required for CPU execution",
+            "legacy_anchor=P2C006-A02 (_discover_backends: CPU always available as fallback), P2C006-A17 (CpuBackend)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "cpu_backend_unavailable"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "backend",
+              "error_detail"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c006.strict.inv002",
+          "title": "Backend trait provides uniform interface across all platform implementations",
+          "preconditions": [
+            "A BackendClient implementation exists for the requested backend string"
+          ],
+          "guarantees": [
+            "All backends expose the same trait surface: devices(), compile(), execute(), transfer()",
+            "Trait methods have identical signatures regardless of underlying platform",
+            "Platform-specific behavior is encapsulated behind the trait boundary",
+            "legacy_anchor=P2C006-A12 (Client: platform-specific client with uniform interface), P2C006-A07 (backend_specific_translations)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "backend_trait_violation"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "backend",
+              "method_name",
+              "reason_code"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c006.strict.inv003",
+          "title": "Value round-trip through device_put/device_get preserves data exactly",
+          "preconditions": [
+            "Value is a valid Scalar or Tensor",
+            "Target device supports the Value's dtype"
+          ],
+          "guarantees": [
+            "device_get(device_put(value, device)) == value for all valid Values",
+            "No floating-point precision loss during transfer (bitwise identity for CPU backend)",
+            "Tensor shape and dtype preserved across round-trip",
+            "legacy_anchor=P2C006-A13 (device_put), P2C006-A14 (device_get)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "device_roundtrip_data_corruption"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "dtype",
+              "shape",
+              "expected_sha256",
+              "actual_sha256"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c006.strict.inv004",
+          "title": "Buffer alignment meets platform ABI requirements",
+          "preconditions": [
+            "Buffer allocated for a TensorValue on a specific backend"
+          ],
+          "guarantees": [
+            "CPU buffers use Rust allocator alignment (min 8-byte for f64, 4-byte for f32/i32)",
+            "Vec<Literal> storage is contiguous in host memory",
+            "No padding bytes between elements of the same dtype",
+            "legacy_anchor=P2C006-A10 (Buffer: device-resident array), P2C006-A25 (memory_stats)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "buffer_alignment_violation"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "dtype",
+              "alignment_expected",
+              "alignment_actual"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c006.strict.inv005",
+          "title": "Backend string in DispatchRequest flows into cache key deterministically",
+          "preconditions": [
+            "DispatchRequest.backend is a non-empty string"
+          ],
+          "guarantees": [
+            "CacheKeyInputRef.backend receives the exact backend string from DispatchRequest",
+            "Different backend strings produce different cache keys",
+            "Backend string is included in canonical payload hash: '|backend={backend}|'",
+            "legacy_anchor=P2C006-A03 (get_backend), P2C006-A04 (default_backend)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "backend_cache_key_mismatch"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "backend",
+              "cache_key"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c006.strict.inv006",
+          "title": "Backend-specific lowering does not alter observable semantics",
+          "preconditions": [
+            "A primitive is evaluated on backend B with platform-specific lowering"
+          ],
+          "guarantees": [
+            "Observable output values are identical regardless of which backend evaluates the primitive",
+            "Floating-point results may differ by ULP tolerance (platform-dependent rounding), but integer results are exact",
+            "Transform composition (jit, grad, vmap) produces the same logical result across backends",
+            "legacy_anchor=P2C006-A07 (backend_specific_translations), P2C006-A21 (platform_specific_lowering)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "cross_backend_semantic_divergence"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "primitive",
+              "backend_a",
+              "backend_b",
+              "max_ulp_diff"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c006.strict.inv007",
+          "title": "Single-device execution is the default; no implicit multi-device distribution",
+          "preconditions": [
+            "DispatchRequest does not specify sharding or device mesh"
+          ],
+          "guarantees": [
+            "Computation runs on exactly one device",
+            "No implicit data parallelism or model parallelism",
+            "All Values remain on the same device throughout execution",
+            "legacy_anchor=P2C006-A05 (local_devices), P2C006-A15 (process_index)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "unexpected_multi_device_execution"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "device_count"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        }
+      ]
+    },
+    {
+      "mode": "hardened",
+      "contract_rows": [
+        {
+          "row_id": "p2c006.hardened.inv008",
+          "title": "Missing GPU/TPU backend falls back to CPU with warning",
+          "preconditions": [
+            "mode == Hardened",
+            "DispatchRequest.backend specifies a non-CPU backend that is unavailable"
+          ],
+          "guarantees": [
+            "Execution falls back to CPU backend instead of failing",
+            "Warning signal emitted to evidence ledger: 'backend_fallback' with original and fallback backend names",
+            "Cache key uses the original requested backend (not the fallback) to preserve key stability",
+            "legacy_anchor=P2C006-A03 (get_backend: falls back to CPU), P2C006-A04 (default_backend: priority ordering)"
+          ],
+          "failure_behavior": {
+            "policy": "warn_and_continue",
+            "reason_code": "hardened_backend_fallback_to_cpu"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "requested_backend",
+              "fallback_backend",
+              "cache_key"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c006.hardened.inv009",
+          "title": "Out-of-memory on device triggers graceful failure (no panic)",
+          "preconditions": [
+            "mode == Hardened",
+            "Device memory allocation fails during computation"
+          ],
+          "guarantees": [
+            "Returns DispatchError (not panic!) with descriptive error message",
+            "OOM event logged to evidence ledger: 'device_oom' with allocation size and device stats",
+            "Partially allocated buffers are released before returning error",
+            "legacy_anchor=P2C006-A25 (memory_stats), P2C006-A18 (GpuBackend: memory fraction)"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_device_oom_graceful"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "requested_bytes",
+              "available_bytes",
+              "device_id"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c006.hardened.inv010",
+          "title": "Cross-device transfer failure retries once, then returns error",
+          "preconditions": [
+            "mode == Hardened",
+            "transfer_to_device() fails on first attempt"
+          ],
+          "guarantees": [
+            "One automatic retry attempt before returning error",
+            "Retry uses same source buffer and target device",
+            "Both failure and retry logged to evidence ledger: 'transfer_retry' signal",
+            "If retry succeeds, execution continues normally; if retry fails, DispatchError returned",
+            "legacy_anchor=P2C006-A23 (transfer_to_device: cross-device buffer transfer)"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_transfer_retry_exhausted"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "source_device",
+              "target_device",
+              "retry_count",
+              "transfer_bytes"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c006.hardened.inv011",
+          "title": "Unknown backend string accepted with CPU fallback and audit trail",
+          "preconditions": [
+            "mode == Hardened",
+            "DispatchRequest.backend is not a recognized backend name"
+          ],
+          "guarantees": [
+            "Execution proceeds on CPU backend",
+            "Unknown backend name included in cache key hash (affects key value)",
+            "Evidence ledger records 'unknown_backend' signal with the unrecognized name",
+            "legacy_anchor=P2C006-A06 (register_backend), P2C006-A03 (get_backend)"
+          ],
+          "failure_behavior": {
+            "policy": "warn_and_continue",
+            "reason_code": "hardened_unknown_backend_fallback"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "requested_backend",
+              "fallback_backend"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        }
+      ]
+    }
+  ],
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "warn_and_continue"
+  },
+  "invariants": [
+    {
+      "invariant_id": "p2c006.strict.inv001",
+      "statement": "CPU backend is always available: dispatch with backend='cpu' never fails due to backend unavailability.",
+      "proof_artifact_refs": [
+        "crates/fj-dispatch/src/lib.rs:206-271 (dispatch function always succeeds for valid programs)",
+        "crates/fj-interpreters/src/lib.rs (eval_jaxpr: CPU-only interpreter)"
+      ]
+    },
+    {
+      "invariant_id": "p2c006.strict.inv002",
+      "statement": "Backend trait provides uniform interface: all backends expose identical API surface.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/backend.rs:38-53 (CacheBackend trait definition)",
+        "Future: BackendClient trait for compute backends"
+      ]
+    },
+    {
+      "invariant_id": "p2c006.strict.inv003",
+      "statement": "Value round-trip preserves data: device_put(device_get(v)) == v for all valid Values.",
+      "proof_artifact_refs": [
+        "crates/fj-core/src/lib.rs (Value enum: Scalar/Tensor always host-resident)",
+        "V1: round-trip is trivial identity since Values never leave host memory"
+      ]
+    },
+    {
+      "invariant_id": "p2c006.strict.inv005",
+      "statement": "Backend string flows into cache key: different backends produce different cache keys.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs (key_sensitivity_backend_change test)",
+        "crates/fj-dispatch/src/lib.rs:209-217 (backend flows from DispatchRequest to CacheKeyInputRef)"
+      ]
+    },
+    {
+      "invariant_id": "p2c006.strict.inv006",
+      "statement": "Backend-specific lowering preserves observable semantics across platforms.",
+      "proof_artifact_refs": [
+        "V1: single execution path via eval_jaxpr (no backend-specific lowering)",
+        "Future: cross-backend conformance test suite"
+      ]
+    },
+    {
+      "invariant_id": "p2c006.hardened.inv008",
+      "statement": "Missing backend triggers CPU fallback in hardened mode (not a hard error).",
+      "proof_artifact_refs": [
+        "V1: CPU-only, so fallback is trivially satisfied",
+        "Future: BackendRegistry.get_or_fallback() implementation"
+      ]
+    },
+    {
+      "invariant_id": "p2c006.hardened.inv009",
+      "statement": "OOM triggers graceful DispatchError, never panic, with evidence logging.",
+      "proof_artifact_refs": [
+        "crates/fj-dispatch/src/lib.rs:161-204 (DispatchError variants: no panic paths)",
+        "V1: host-memory only; OOM handled by Rust allocator (abort, not panic)"
+      ]
+    },
+    {
+      "invariant_id": "p2c006.hardened.inv010",
+      "statement": "Transfer failure retries once before returning error in hardened mode.",
+      "proof_artifact_refs": [
+        "V1: no cross-device transfer (single host, CPU-only)",
+        "Future: retry logic in BackendClient.transfer() wrapper"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+[package]
+name = "fj-api"
+description = "FrankenJAX user-facing transform API: jit, grad, vmap, value_and_grad"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fj-core = { path = "../fj-core" }
+fj-dispatch = { path = "../fj-dispatch" }
+
+[dev-dependencies]
+fj-test-utils = { path = "../fj-test-utils" }

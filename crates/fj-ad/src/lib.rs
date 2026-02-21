@@ -1507,7 +1507,7 @@ pub fn grad_first(jaxpr: &Jaxpr, args: &[Value]) -> Result<f64, AdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fj_core::{ProgramSpec, build_program};
+    use fj_core::{Equation, ProgramSpec, build_program};
 
     #[test]
     fn grad_x_squared_at_3() {
@@ -2235,6 +2235,175 @@ mod tests {
         assert!(
             (sym - expected).abs() < 1e-8,
             "grad(tanh(2x)) at x=0.5: sym={sym}, expected={expected}"
+        );
+    }
+
+    // ── Max/Min VJP tie-breaking and edge cases ──────────────────
+
+    #[test]
+    fn vjp_max_gradient_goes_to_first_arg_when_equal() {
+        use smallvec::smallvec;
+        // max(a, b) with a == b: gradient goes to a (first arg, Ge is true)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0), VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Max,
+                inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let x = 5.0;
+        // grad w.r.t. first arg: should be 1.0 (first arg wins the tie)
+        let g0 = grad_first(&jaxpr, &[Value::scalar_f64(x), Value::scalar_f64(x)]).unwrap();
+        assert!(
+            (g0 - 1.0).abs() < 1e-10,
+            "max tie: grad w.r.t. first arg should be 1.0, got {g0}"
+        );
+    }
+
+    #[test]
+    fn vjp_max_distinct_values() {
+        use smallvec::smallvec;
+        // max(3, 7) → grad goes entirely to second arg (b > a)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0), VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Max,
+                inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let g0 = grad_first(&jaxpr, &[Value::scalar_f64(3.0), Value::scalar_f64(7.0)]).unwrap();
+        assert!(
+            g0.abs() < 1e-10,
+            "max(3,7): grad w.r.t. first arg should be 0.0, got {g0}"
+        );
+    }
+
+    #[test]
+    fn vjp_min_gradient_goes_to_first_arg_when_equal() {
+        use smallvec::smallvec;
+        // min(a, b) with a == b: gradient goes to a (first arg, Le is true)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0), VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Min,
+                inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let x = 5.0;
+        let g0 = grad_first(&jaxpr, &[Value::scalar_f64(x), Value::scalar_f64(x)]).unwrap();
+        assert!(
+            (g0 - 1.0).abs() < 1e-10,
+            "min tie: grad w.r.t. first arg should be 1.0, got {g0}"
+        );
+    }
+
+    #[test]
+    fn vjp_min_distinct_values() {
+        use smallvec::smallvec;
+        // min(7, 3) → grad goes entirely to second arg (b < a)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0), VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Min,
+                inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let g0 = grad_first(&jaxpr, &[Value::scalar_f64(7.0), Value::scalar_f64(3.0)]).unwrap();
+        assert!(
+            g0.abs() < 1e-10,
+            "min(7,3): grad w.r.t. first arg should be 0.0, got {g0}"
+        );
+    }
+
+    // ── Higher-order gradient tests ─────────────────────────────
+    // Tests second derivative (grad of grad) for key functions.
+
+    #[test]
+    fn second_derivative_x_squared() {
+        use smallvec::smallvec;
+        // f(x) = x², f'(x) = 2x, f''(x) = 2
+        // Build inner: grad(x²) = 2x
+        let inner = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Square,
+                inputs: smallvec![Atom::Var(VarId(0))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        // First derivative at x=3: should be 6
+        let first = grad_first(&inner, &[Value::scalar_f64(3.0)]).unwrap();
+        assert!((first - 6.0).abs() < 1e-8, "f'(3) = 2*3 = 6, got {first}");
+
+        // Build graph for f'(x) = 2x to take second derivative
+        // f'(x) = x + x (numerically equivalent to 2x but buildable)
+        let first_deriv = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(0))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        // Second derivative: grad(2x) = 2
+        let second = grad_first(&first_deriv, &[Value::scalar_f64(3.0)]).unwrap();
+        assert!(
+            (second - 2.0).abs() < 1e-8,
+            "f''(x) should be 2, got {second}"
+        );
+    }
+
+    #[test]
+    fn second_derivative_exp() {
+        use smallvec::smallvec;
+        // f(x) = exp(x), f'(x) = exp(x), f''(x) = exp(x)
+        // So grad(exp)(x) = exp(x) for all orders
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(1)],
+            vec![Equation {
+                primitive: Primitive::Exp,
+                inputs: smallvec![Atom::Var(VarId(0))],
+                outputs: smallvec![VarId(1)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let x = 1.0;
+        let first = grad_first(&jaxpr, &[Value::scalar_f64(x)]).unwrap();
+        let expected = x.exp();
+        assert!(
+            (first - expected).abs() < 1e-8,
+            "grad(exp)(1.0) should be e, got {first}"
         );
     }
 

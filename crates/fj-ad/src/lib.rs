@@ -1086,19 +1086,29 @@ fn zero_scattered_positions(g: &Value, indices: &Value) -> Result<Value, AdError
 
     let index_vals: Vec<usize> = match indices {
         Value::Scalar(lit) => {
-            vec![
-                lit.as_f64()
-                    .ok_or_else(|| AdError::EvalFailed("non-numeric index".into()))?
-                    as usize,
-            ]
+            let v = lit
+                .as_f64()
+                .ok_or_else(|| AdError::EvalFailed("non-numeric index".into()))?;
+            if !v.is_finite() || v < 0.0 {
+                return Err(AdError::EvalFailed(format!(
+                    "scatter index must be a non-negative finite number, got {v}"
+                )));
+            }
+            vec![v as usize]
         }
         Value::Tensor(t) => t
             .elements
             .iter()
             .map(|lit| {
-                lit.as_f64()
-                    .ok_or_else(|| AdError::EvalFailed("non-numeric index".into()))
-                    .map(|v| v as usize)
+                let v = lit
+                    .as_f64()
+                    .ok_or_else(|| AdError::EvalFailed("non-numeric index".into()))?;
+                if !v.is_finite() || v < 0.0 {
+                    return Err(AdError::EvalFailed(format!(
+                        "scatter index must be a non-negative finite number, got {v}"
+                    )));
+                }
+                Ok(v as usize)
             })
             .collect::<Result<_, _>>()?,
     };

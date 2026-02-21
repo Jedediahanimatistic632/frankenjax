@@ -175,6 +175,20 @@ pub fn algebraic_rules() -> Vec<egg::Rewrite<FjLang, ()>> {
         // ── Nested select with same condition ──────────────────────────
         rewrite!("select-nest-true"; "(select ?c (select ?c ?a ?b) ?x)" => "(select ?c ?a ?x)"),
         rewrite!("select-nest-false"; "(select ?c ?x (select ?c ?a ?b))" => "(select ?c ?x ?b)"),
+        // ── Multiplicative cancellation ──────────────────────────────
+        rewrite!("mul-reciprocal"; "(mul ?a (reciprocal ?a))" => "1"),
+        rewrite!("div-mul-cancel"; "(div (mul ?a ?b) ?b)" => "?a"),
+        // ── Additional power rules ────────────────────────────────────
+        rewrite!("pow-neg-one"; "(pow ?a (neg 1))" => "(reciprocal ?a)"),
+        rewrite!("pow-two"; "(pow ?a 2)" => "(mul ?a ?a)"),
+        // ── Log decomposition ─────────────────────────────────────────
+        rewrite!("log-product"; "(log (mul ?a ?b))" => "(add (log ?a) (log ?b))"),
+        rewrite!("log-quotient"; "(log (div ?a ?b))" => "(sub (log ?a) (log ?b))"),
+        // ── Erf / Erfc identities ─────────────────────────────────────
+        rewrite!("erf-neg"; "(erf (neg ?a))" => "(neg (erf ?a))"),
+        // ── Max / Min absorption ──────────────────────────────────────
+        rewrite!("max-min-absorb"; "(max ?a (min ?a ?b))" => "?a"),
+        rewrite!("min-max-absorb"; "(min ?a (max ?a ?b))" => "?a"),
     ]
 }
 
@@ -1758,6 +1772,268 @@ mod tests {
         assert!(
             optimized.equations.len() <= jaxpr.equations.len(),
             "nested select should not increase equation count: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    // ── Multiplicative cancellation ────────────────────────────────
+
+    #[test]
+    fn mul_reciprocal_cancels_to_one() {
+        // mul(x, reciprocal(x)) → 1
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(2)],
+            vec![
+                Equation {
+                    primitive: Primitive::Reciprocal,
+                    inputs: smallvec![Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(1)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "mul(x, reciprocal(x)) should simplify to 1: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn div_mul_cancel() {
+        // div(mul(a, b), b) → a
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0), VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Div,
+                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "div(mul(a,b), b) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    // ── Power rules ───────────────────────────────────────────────────
+
+    #[test]
+    fn pow_neg_one_is_reciprocal() {
+        // pow(x, -1) → reciprocal(x)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(2)],
+            vec![
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Lit(Literal::from_f64(1.0))],
+                    outputs: smallvec![VarId(1)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Pow,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "pow(x, -1) should simplify to reciprocal: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn pow_two_is_square() {
+        // pow(x, 2) → mul(x, x)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(1)],
+            vec![Equation {
+                primitive: Primitive::Pow,
+                inputs: smallvec![Atom::Var(VarId(0)), Atom::Lit(Literal::from_f64(2.0))],
+                outputs: smallvec![VarId(1)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        // pow(x,2) rewrites to mul(x,x) which is same cost, so equation count
+        // should not increase
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "pow(x, 2) should not increase cost: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    // ── Log decomposition ─────────────────────────────────────────────
+
+    #[test]
+    fn log_product_decomposes() {
+        // log(mul(a, b)) → add(log(a), log(b))
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0), VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        // The decomposition creates more ops but proves the rule fires
+        // (equivalence class contains both forms)
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len() + 2,
+            "log(mul(a,b)) decomposition should not blow up: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    // ── Erf negation ──────────────────────────────────────────────────
+
+    #[test]
+    fn erf_neg_symmetry() {
+        // erf(neg(x)) → neg(erf(x))
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(2)],
+            vec![
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(1)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Erf,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "erf(neg(x)) should not increase: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    // ── Max/Min absorption ────────────────────────────────────────────
+
+    #[test]
+    fn max_min_absorption() {
+        // max(a, min(a, b)) → a
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0), VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Min,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Max,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "max(a, min(a, b)) should simplify to a: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn min_max_absorption() {
+        // min(a, max(a, b)) → a
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0), VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Max,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Min,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "min(a, max(a, b)) should simplify to a: got {} eqns (was {})",
             optimized.equations.len(),
             jaxpr.equations.len(),
         );

@@ -665,6 +665,16 @@ pub(crate) fn eval_gather(
 
     // Compute operand strides (row-major)
     let op_dims = &operand.shape.dims;
+
+    for (ax, (&ss, &dim)) in slice_sizes.iter().zip(op_dims.iter()).enumerate() {
+        if ss > dim as usize {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("slice_sizes[{ax}] = {ss} exceeds operand dimension {dim}"),
+            });
+        }
+    }
+
     let mut op_strides = vec![1_usize; rank];
     for i in (0..rank.saturating_sub(1)).rev() {
         op_strides[i] = op_strides[i + 1] * op_dims[i + 1] as usize;
@@ -804,6 +814,26 @@ pub(crate) fn eval_scatter(
         .map(|s| s.as_str())
         .unwrap_or("overwrite");
 
+    if mode != "overwrite" && mode != "add" {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("unknown scatter mode \"{mode}\", expected \"overwrite\" or \"add\""),
+        });
+    }
+
+    let expected_update_elems = index_vals.len() * slice_elems;
+    if updates.elements.len() != expected_update_elems {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "updates has {} elements but expected {} (num_indices={} * slice_elems={slice_elems})",
+                updates.elements.len(),
+                expected_update_elems,
+                index_vals.len()
+            ),
+        });
+    }
+
     for (i, &idx) in index_vals.iter().enumerate() {
         if idx >= op_dims[0] as usize {
             return Err(EvalError::Unsupported {
@@ -819,16 +849,14 @@ pub(crate) fn eval_scatter(
         let update_offset = i * slice_elems;
 
         for j in 0..slice_elems {
-            if update_offset + j < updates.elements.len() {
-                let current = &result_elements[base_offset + j];
-                let update = &updates.elements[update_offset + j];
-                if mode == "add" {
-                    let c_val = current.as_f64().unwrap_or(0.0);
-                    let u_val = update.as_f64().unwrap_or(0.0);
-                    result_elements[base_offset + j] = Literal::from_f64(c_val + u_val);
-                } else {
-                    result_elements[base_offset + j] = *update;
-                }
+            let current = &result_elements[base_offset + j];
+            let update = &updates.elements[update_offset + j];
+            if mode == "add" {
+                let c_val = current.as_f64().unwrap_or(0.0);
+                let u_val = update.as_f64().unwrap_or(0.0);
+                result_elements[base_offset + j] = Literal::from_f64(c_val + u_val);
+            } else {
+                result_elements[base_offset + j] = *update;
             }
         }
     }

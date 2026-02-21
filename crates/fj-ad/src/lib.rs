@@ -2431,8 +2431,7 @@ mod tests {
 
     fn assert_binary_grad_matches(prim: Primitive, a: f64, b: f64, tol: f64) {
         let jaxpr = make_binary_jaxpr(prim);
-        let grads =
-            grad_jaxpr(&jaxpr, &[Value::scalar_f64(a), Value::scalar_f64(b)]).unwrap();
+        let grads = grad_jaxpr(&jaxpr, &[Value::scalar_f64(a), Value::scalar_f64(b)]).unwrap();
         let sym_da = to_f64(&grads[0]).unwrap();
         let sym_db = to_f64(&grads[1]).unwrap();
         let (num_da, num_db) = numerical_grad_binary(prim, a, b);

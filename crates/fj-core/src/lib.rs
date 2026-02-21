@@ -2230,7 +2230,7 @@ mod tests {
     fn value_as_i64_scalar() {
         assert_eq!(Value::scalar_i64(42).as_i64_scalar(), Some(42));
         assert_eq!(Value::scalar_i64(-7).as_i64_scalar(), Some(-7));
-        assert_eq!(Value::scalar_f64(3.14).as_i64_scalar(), None);
+        assert_eq!(Value::scalar_f64(2.78).as_i64_scalar(), None);
         assert_eq!(Value::scalar_bool(true).as_i64_scalar(), None);
     }
 

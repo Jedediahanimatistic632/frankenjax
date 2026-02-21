@@ -1707,7 +1707,8 @@ mod tests {
         let mut params = BTreeMap::new();
         params.insert("mode".into(), "add".into());
 
-        let out = eval_primitive(Primitive::Scatter, &[operand, indices, updates], &params).unwrap();
+        let out =
+            eval_primitive(Primitive::Scatter, &[operand, indices, updates], &params).unwrap();
         if let Value::Tensor(t) = &out {
             let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
             assert_eq!(vals[0], 0.0);
@@ -1746,7 +1747,8 @@ mod tests {
         let mut params = BTreeMap::new();
         params.insert("mode".into(), "add".into());
 
-        let out = eval_primitive(Primitive::Scatter, &[operand, indices, updates], &params).unwrap();
+        let out =
+            eval_primitive(Primitive::Scatter, &[operand, indices, updates], &params).unwrap();
         if let Value::Tensor(t) = &out {
             let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
             assert_eq!(vals, vec![105.0, 200.0, 300.0]);
@@ -1759,10 +1761,165 @@ mod tests {
     // Concatenate edge cases
     // ===================================================================
 
+    // ===================================================================
+    // Gather edge cases
+    // ===================================================================
+
+    #[test]
+    fn gather_slice_sizes_exceed_operand_dims_rejected() {
+        // operand shape [3, 2], slice_sizes [1, 5] — 5 > 2 should fail
+        let operand = Value::Tensor(
+            fj_core::TensorValue::new(
+                fj_core::DType::F64,
+                fj_core::Shape { dims: vec![3, 2] },
+                vec![
+                    fj_core::Literal::from_f64(1.0),
+                    fj_core::Literal::from_f64(2.0),
+                    fj_core::Literal::from_f64(3.0),
+                    fj_core::Literal::from_f64(4.0),
+                    fj_core::Literal::from_f64(5.0),
+                    fj_core::Literal::from_f64(6.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let indices = Value::scalar_i64(0);
+        let mut params = BTreeMap::new();
+        params.insert("slice_sizes".into(), "1,5".into());
+        let result = eval_primitive(Primitive::Gather, &[operand, indices], &params);
+        assert!(result.is_err(), "slice_sizes[1]=5 exceeds dim=2");
+    }
+
+    #[test]
+    fn gather_empty_indices() {
+        let operand = Value::vector_f64(&[10.0, 20.0, 30.0]).unwrap();
+        let indices = Value::Tensor(
+            fj_core::TensorValue::new(
+                fj_core::DType::I64,
+                fj_core::Shape { dims: vec![0] },
+                vec![],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("slice_sizes".into(), "1".into());
+        let result = eval_primitive(Primitive::Gather, &[operand, indices], &params).unwrap();
+        if let Value::Tensor(t) = &result {
+            assert_eq!(t.elements.len(), 0);
+            assert_eq!(t.shape.dims[0], 0);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    // ===================================================================
+    // Scatter edge cases
+    // ===================================================================
+
+    #[test]
+    fn scatter_duplicate_indices_overwrite_last_wins() {
+        // indices [0, 0] with updates [10, 20] — last write wins
+        let operand = Value::vector_f64(&[0.0, 0.0, 0.0]).unwrap();
+        let indices = Value::vector_i64(&[0, 0]).unwrap();
+        let updates = Value::vector_f64(&[10.0, 20.0]).unwrap();
+        let out = eval_primitive(
+            Primitive::Scatter,
+            &[operand, indices, updates],
+            &no_params(),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals[0], 20.0, "last write should win for duplicate indices");
+            assert_eq!(vals[1], 0.0);
+            assert_eq!(vals[2], 0.0);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn scatter_unknown_mode_rejected() {
+        let operand = Value::vector_f64(&[1.0, 2.0]).unwrap();
+        let indices = Value::vector_i64(&[0]).unwrap();
+        let updates = Value::vector_f64(&[9.0]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("mode".into(), "invalid_mode".into());
+        let result = eval_primitive(Primitive::Scatter, &[operand, indices, updates], &params);
+        assert!(result.is_err(), "unknown mode should be rejected");
+    }
+
+    #[test]
+    fn scatter_updates_shape_mismatch_rejected() {
+        // operand [3], indices [1], updates [2] — updates has 2 elems but expected 1
+        let operand = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let indices = Value::vector_i64(&[0]).unwrap();
+        let updates = Value::vector_f64(&[10.0, 20.0]).unwrap();
+        let result = eval_primitive(
+            Primitive::Scatter,
+            &[operand, indices, updates],
+            &no_params(),
+        );
+        assert!(
+            result.is_err(),
+            "updates element count mismatch should error"
+        );
+    }
+
+    // ===================================================================
+    // Slice edge cases
+    // ===================================================================
+
+    #[test]
+    fn slice_empty_result() {
+        // slice with start == limit should produce empty tensor
+        let v = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("start_indices".into(), "2".into());
+        params.insert("limit_indices".into(), "2".into());
+        let out = eval_primitive(Primitive::Slice, &[v], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.elements.len(), 0);
+            assert_eq!(t.shape.dims[0], 0);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn slice_single_element() {
+        let v = Value::vector_f64(&[10.0, 20.0, 30.0]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("start_indices".into(), "1".into());
+        params.insert("limit_indices".into(), "2".into());
+        let out = eval_primitive(Primitive::Slice, &[v], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.elements.len(), 1);
+            assert_eq!(t.elements[0].as_f64().unwrap(), 20.0);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn slice_start_exceeds_limit_rejected() {
+        let v = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("start_indices".into(), "2".into());
+        params.insert("limit_indices".into(), "1".into());
+        let result = eval_primitive(Primitive::Slice, &[v], &params);
+        assert!(result.is_err(), "start > limit should error");
+    }
+
     #[test]
     fn concatenate_single_input() {
         let a = Value::vector_i64(&[1, 2, 3]).unwrap();
-        let out = eval_primitive(Primitive::Concatenate, &[a.clone()], &no_params()).unwrap();
+        let out = eval_primitive(
+            Primitive::Concatenate,
+            std::slice::from_ref(&a),
+            &no_params(),
+        )
+        .unwrap();
         assert_eq!(out, a);
     }
 

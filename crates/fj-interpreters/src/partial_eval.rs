@@ -113,6 +113,20 @@ pub fn partial_eval_jaxpr(
     jaxpr: &Jaxpr,
     unknowns: &[bool],
 ) -> Result<PartialEvalResult, PartialEvalError> {
+    partial_eval_jaxpr_typed(jaxpr, unknowns, None)
+}
+
+/// Partially evaluate a Jaxpr with optional input abstract values for proper
+/// residual typing.
+///
+/// When `in_avals` is provided, residual abstract values are computed from the
+/// input types and equation output inference. Without it, residuals default to
+/// F64 scalar (legacy behavior).
+pub fn partial_eval_jaxpr_typed(
+    jaxpr: &Jaxpr,
+    unknowns: &[bool],
+    in_avals: Option<&[AbstractValue]>,
+) -> Result<PartialEvalResult, PartialEvalError> {
     if unknowns.len() != jaxpr.invars.len() {
         return Err(PartialEvalError::InputMaskMismatch {
             expected: jaxpr.invars.len(),
@@ -161,6 +175,14 @@ pub fn partial_eval_jaxpr(
     let max_var_id = max_var_in_jaxpr(jaxpr);
     let bitset_len = max_var_id + 1;
 
+    // Build optional var→aval map for residual typing.
+    let mut var_aval: Vec<Option<AbstractValue>> = vec![None; bitset_len];
+    if let Some(avals) = in_avals {
+        for (var, aval) in jaxpr.invars.iter().zip(avals.iter()) {
+            var_aval[var.0 as usize] = Some(aval.clone());
+        }
+    }
+
     let mut is_unknown_var = vec![false; bitset_len];
     for (var, &is_unk) in jaxpr.invars.iter().zip(unknowns.iter()) {
         if is_unk {
@@ -197,6 +219,26 @@ pub fn partial_eval_jaxpr(
                 }
             }
         } else {
+            // Propagate types through known equations for residual typing.
+            if in_avals.is_some() {
+                let first_input_aval = eqn.inputs.iter().find_map(|atom| match atom {
+                    Atom::Var(v) => var_aval[v.0 as usize].clone(),
+                    Atom::Lit(lit) => Some(AbstractValue {
+                        dtype: match lit {
+                            fj_core::Literal::I64(_) => DType::I64,
+                            fj_core::Literal::Bool(_) => DType::Bool,
+                            fj_core::Literal::F64Bits(_) => DType::F64,
+                        },
+                        shape: Shape::scalar(),
+                    }),
+                });
+                if let Some(aval) = first_input_aval {
+                    let out_aval = infer_equation_output_aval(eqn, &aval);
+                    for out_var in &eqn.outputs {
+                        var_aval[out_var.0 as usize] = Some(out_aval.clone());
+                    }
+                }
+            }
             known_eqns.push(eqn.clone());
         }
     }
@@ -298,12 +340,18 @@ pub fn partial_eval_jaxpr(
         .map(|v| is_unknown_var[v.0 as usize])
         .collect();
 
-    // Compute residual abstract values.
+    // Compute residual abstract values from var_aval map when available,
+    // falling back to F64 scalar for unknown types.
+    let default_aval = AbstractValue {
+        dtype: DType::F64,
+        shape: Shape::scalar(),
+    };
     let residual_avals: Vec<AbstractValue> = residual_vars
         .iter()
-        .map(|_| AbstractValue {
-            dtype: DType::F64,
-            shape: Shape::scalar(),
+        .map(|v| {
+            var_aval[v.0 as usize]
+                .clone()
+                .unwrap_or_else(|| default_aval.clone())
         })
         .collect();
 
@@ -375,6 +423,28 @@ pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
     );
 
     (new_jaxpr, used_inputs)
+}
+
+/// Infer the output abstract value of an equation from the first input's aval.
+///
+/// For most element-wise primitives the output type/shape matches the input.
+/// Comparison primitives always output Bool. Reductions reduce to scalar.
+fn infer_equation_output_aval(eqn: &Equation, first_input: &AbstractValue) -> AbstractValue {
+    use fj_core::Primitive::*;
+    match eqn.primitive {
+        // Comparisons always produce Bool
+        Eq | Ne | Lt | Le | Gt | Ge => AbstractValue {
+            dtype: DType::Bool,
+            shape: first_input.shape.clone(),
+        },
+        // Reductions collapse to scalar (full reduction default)
+        ReduceSum | ReduceMax | ReduceMin | ReduceProd => AbstractValue {
+            dtype: first_input.dtype,
+            shape: Shape::scalar(),
+        },
+        // Most element-wise ops preserve dtype and shape
+        _ => first_input.clone(),
+    }
 }
 
 /// Compute the maximum VarId index in a Jaxpr (for bitset sizing).
@@ -1016,6 +1086,98 @@ mod tests {
                 let known_direct_outs: usize = result.out_unknowns.iter().filter(|u| !**u).count();
                 let residual_count = known_out_count - known_direct_outs;
                 assert_eq!(residual_count, result.residual_avals.len());
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_typed_residual_preserves_i64_dtype() {
+        run_logged_test(
+            "test_pe_typed_residual_preserves_i64_dtype",
+            &("pe", "mixed", "typed_residual"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // a(known, I64) -> neg(a) = v2 -> mul(v2, b(unknown)) = v3
+                // Residual v2 should have I64 dtype when typed PE is used
+                let jaxpr = make_neg_mul_jaxpr();
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::I64,
+                        shape: Shape::scalar(),
+                    },
+                    AbstractValue {
+                        dtype: DType::I64,
+                        shape: Shape::scalar(),
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
+                assert!(!result.residual_avals.is_empty(), "should have residuals");
+                assert_eq!(
+                    result.residual_avals[0].dtype,
+                    DType::I64,
+                    "residual should preserve I64 dtype"
+                );
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_typed_residual_comparison_produces_bool() {
+        run_logged_test(
+            "test_pe_typed_residual_comparison_produces_bool",
+            &("pe", "mixed", "typed_comparison"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // a(known, F64) -> eq(a, a) = v2(Bool) -> select(v2, b(unknown), b) = v3
+                // Residual v2 should have Bool dtype
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1), VarId(2)],
+                    vec![],
+                    vec![VarId(4)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::Eq,
+                            inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(3)],
+                            params: BTreeMap::new(),
+                        },
+                        Equation {
+                            primitive: Primitive::Select,
+                            inputs: smallvec![
+                                Atom::Var(VarId(3)),
+                                Atom::Var(VarId(2)),
+                                Atom::Var(VarId(2))
+                            ],
+                            outputs: smallvec![VarId(4)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape::scalar(),
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape::scalar(),
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
+                // v3 is produced by Eq → Bool, and consumed by Select (unknown)
+                let eq_residual = result
+                    .residual_avals
+                    .iter()
+                    .find(|a| a.dtype == DType::Bool);
+                assert!(
+                    eq_residual.is_some(),
+                    "comparison residual should have Bool dtype, got: {:?}",
+                    result.residual_avals
+                );
                 Ok(vec![])
             },
         );

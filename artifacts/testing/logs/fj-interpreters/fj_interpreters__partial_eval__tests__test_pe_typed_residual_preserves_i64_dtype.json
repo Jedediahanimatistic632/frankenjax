@@ -1,7 +1,7 @@
 {
   "schema_version": "frankenjax.test-log.v1",
-  "test_id": "fj_interpreters::partial_eval::tests::test_pe_staging_equivalence_all_known",
-  "fixture_id": "ab971f5309ebdb4f34d7bcbbaa1c029498ff6175a98cb84a5e582e01917da075",
+  "test_id": "fj_interpreters::partial_eval::tests::test_pe_typed_residual_preserves_i64_dtype",
+  "fixture_id": "80eb669e8028c08a3452d962e377e5e4377f8e517fa0d75bbbb68f7aa5c865d4",
   "seed": null,
   "mode": "strict",
   "env": {
@@ -12,8 +12,8 @@
   },
   "artifact_refs": [
     "packet:FJ-P2C-003",
-    "replay: cargo test -p fj-interpreters --lib fj_interpreters::partial_eval::tests::test_pe_staging_equivalence_all_known -- --exact --nocapture",
-    "/data/projects/frankenjax/crates/fj-interpreters/../../artifacts/testing/logs/fj-interpreters/fj_interpreters__partial_eval__tests__test_pe_staging_equivalence_all_known.json"
+    "replay: cargo test -p fj-interpreters --lib fj_interpreters::partial_eval::tests::test_pe_typed_residual_preserves_i64_dtype -- --exact --nocapture",
+    "/data/projects/frankenjax/crates/fj-interpreters/../../artifacts/testing/logs/fj-interpreters/fj_interpreters__partial_eval__tests__test_pe_typed_residual_preserves_i64_dtype.json"
   ],
   "result": "pass",
   "duration_ms": 118,

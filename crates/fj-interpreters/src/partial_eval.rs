@@ -139,9 +139,9 @@ pub fn partial_eval_jaxpr(
         });
     }
 
-    // Fast path: all-unknown — everything goes to unknown jaxpr, no residuals.
+    // Fast path: all-unknown (only safe if there are no constvars to thread as residuals)
     let all_unknown = unknowns.iter().all(|u| *u);
-    if all_unknown {
+    if all_unknown && jaxpr.constvars.is_empty() {
         let out_unknowns = vec![true; jaxpr.outvars.len()];
         return Ok(PartialEvalResult {
             jaxpr_known: Jaxpr::new(vec![], jaxpr.constvars.clone(), vec![], vec![]),

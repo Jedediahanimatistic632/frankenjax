@@ -677,7 +677,7 @@ pub(crate) fn eval_gather(
     }
 
     // Number of elements per gathered slice (product of slice_sizes[1..])
-    let slice_elems: usize = slice_sizes[1..].iter().product::<usize>().max(1);
+    let slice_elems: usize = slice_sizes[1..].iter().product::<usize>();
 
     let total = num_indices * slice_elems;
     let mut elements = Vec::with_capacity(total);
@@ -794,10 +794,12 @@ pub(crate) fn eval_scatter(
     }
 
     // Number of elements per slice (product of dims[1..])
-    let slice_elems: usize = op_dims[1..].iter().map(|d| *d as usize).product::<usize>().max(1);
+    let slice_elems: usize = op_dims[1..].iter().map(|d| *d as usize).product::<usize>();
 
     // Clone operand elements to create output
     let mut result_elements = operand.elements.clone();
+
+    let mode = params.get("mode").map(|s| s.as_str()).unwrap_or("overwrite");
 
     for (i, &idx) in index_vals.iter().enumerate() {
         if idx >= op_dims[0] as usize {
@@ -815,7 +817,15 @@ pub(crate) fn eval_scatter(
 
         for j in 0..slice_elems {
             if update_offset + j < updates.elements.len() {
-                result_elements[base_offset + j] = updates.elements[update_offset + j];
+                let current = &result_elements[base_offset + j];
+                let update = &updates.elements[update_offset + j];
+                if mode == "add" {
+                    let c_val = current.as_f64().unwrap_or(0.0);
+                    let u_val = update.as_f64().unwrap_or(0.0);
+                    result_elements[base_offset + j] = Literal::from_f64(c_val + u_val);
+                } else {
+                    result_elements[base_offset + j] = *update;
+                }
             }
         }
     }

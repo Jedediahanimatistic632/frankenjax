@@ -321,7 +321,36 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                 Literal::I64(v) => *v != 0,
                 Literal::F64Bits(bits) => f64::from_bits(*bits) != 0.0,
             };
-            Ok(Value::Scalar(if c { *on_true } else { *on_false }))
+            let val = if c { *on_true } else { *on_false };
+            let lhs_dtype = match on_true {
+                Literal::I64(_) => DType::I64,
+                Literal::F64Bits(_) => DType::F64,
+                Literal::Bool(_) => DType::Bool,
+            };
+            let rhs_dtype = match on_false {
+                Literal::I64(_) => DType::I64,
+                Literal::F64Bits(_) => DType::F64,
+                Literal::Bool(_) => DType::Bool,
+            };
+            let dtype = promote_dtype(lhs_dtype, rhs_dtype);
+            let promoted_val = match dtype {
+                DType::F64 | DType::F32 => {
+                    let f_val = val.as_f64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "expected numeric scalar for select",
+                    })?;
+                    Literal::from_f64(f_val)
+                }
+                DType::I64 | DType::I32 => {
+                    let i_val = val.as_i64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "expected integer scalar for select",
+                    })?;
+                    Literal::I64(i_val)
+                }
+                DType::Bool => val,
+            };
+            Ok(Value::Scalar(promoted_val))
         }
         (Value::Tensor(cond), Value::Tensor(on_true), Value::Tensor(on_false)) => {
             if cond.shape != on_true.shape || cond.shape != on_false.shape {
@@ -330,7 +359,8 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                     detail: "select requires all inputs to have the same shape".to_owned(),
                 });
             }
-            let elements: Vec<Literal> = cond
+            let dtype = promote_dtype(on_true.dtype, on_false.dtype);
+            let elements: Result<Vec<Literal>, EvalError> = cond
                 .elements
                 .iter()
                 .zip(on_true.elements.iter())
@@ -341,14 +371,30 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                         Literal::I64(v) => *v != 0,
                         Literal::F64Bits(bits) => f64::from_bits(*bits) != 0.0,
                     };
-                    if flag { *t } else { *f }
+                    let val = if flag { *t } else { *f };
+                    match dtype {
+                        DType::F64 | DType::F32 => {
+                            let f_val = val.as_f64().ok_or(EvalError::TypeMismatch {
+                                primitive,
+                                detail: "expected numeric tensor elements for select",
+                            })?;
+                            Ok(Literal::from_f64(f_val))
+                        }
+                        DType::I64 | DType::I32 => {
+                            let i_val = val.as_i64().ok_or(EvalError::TypeMismatch {
+                                primitive,
+                                detail: "expected integer tensor elements for select",
+                            })?;
+                            Ok(Literal::I64(i_val))
+                        }
+                        DType::Bool => Ok(val),
+                    }
                 })
                 .collect();
-            let dtype = promote_dtype(on_true.dtype, on_false.dtype);
             Ok(Value::Tensor(TensorValue::new(
                 dtype,
                 cond.shape.clone(),
-                elements,
+                elements?,
             )?))
         }
         _ => Err(EvalError::Unsupported {

@@ -819,12 +819,11 @@ fn value_type_fingerprint(expected: &FixtureValue) -> &'static str {
 
 fn value_type_runtime(actual: &Value) -> &'static str {
     if let Some(scalar) = actual.as_scalar_literal() {
-        if scalar.as_i64().is_some() {
-            return "i64";
-        }
-        if scalar.as_f64().is_some() {
-            return "f64";
-        }
+        return match scalar {
+            fj_core::Literal::I64(_) => "i64",
+            fj_core::Literal::F64Bits(_) => "f64",
+            fj_core::Literal::Bool(_) => "bool",
+        };
     }
 
     if let Some(tensor) = actual.as_tensor() {

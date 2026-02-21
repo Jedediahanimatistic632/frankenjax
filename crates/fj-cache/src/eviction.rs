@@ -252,8 +252,10 @@ impl<B: CacheBackend> CacheBackend for TtlLruCache<B> {
 
     fn put(&mut self, key: &CacheKey, artifact: CachedArtifact) {
         let key_str = key.as_string();
-        self.insert_times
-            .insert(key_str, std::time::Instant::now());
+        if self.ttl_secs > 0 {
+            self.insert_times
+                .insert(key_str, std::time::Instant::now());
+        }
         self.inner.put(key, artifact);
         // Opportunistically sweep expired entries
         self.sweep_expired();

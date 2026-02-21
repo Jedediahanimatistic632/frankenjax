@@ -30,7 +30,7 @@ pub(crate) fn eval_reduce(
 
             // Full reduction (all elements to scalar)
             if rank == 0 {
-                return Ok(inputs[0].clone());
+                return Ok(Value::Scalar(tensor.elements[0]));
             }
 
             let is_integral = tensor.dtype == DType::I64 || tensor.dtype == DType::I32;

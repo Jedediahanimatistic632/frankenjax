@@ -85,7 +85,10 @@ pub fn eval_jaxpr_with_consts(
         });
     }
 
-    let mut env: FxHashMap<VarId, Value> = FxHashMap::default();
+    let mut env: FxHashMap<VarId, Value> = FxHashMap::with_capacity_and_hasher(
+        jaxpr.constvars.len() + jaxpr.invars.len() + jaxpr.equations.len(),
+        Default::default(),
+    );
     for (idx, var) in jaxpr.constvars.iter().enumerate() {
         env.insert(*var, const_values[idx].clone());
     }

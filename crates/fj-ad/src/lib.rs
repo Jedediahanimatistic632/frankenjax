@@ -851,12 +851,37 @@ fn vjp(
                             .collect(),
                     };
 
-                    // For 1D case (most common in current usage)
-                    let start = starts.first().copied().unwrap_or(0);
-                    for (i, &gval) in g_elements.iter().enumerate() {
-                        let target = start + i;
-                        if target < total {
-                            result_elements[target] = Literal::from_f64(gval);
+                    let rank = t.shape.rank();
+                    let mut in_strides = vec![1_usize; rank];
+                    for i in (0..rank.saturating_sub(1)).rev() {
+                        in_strides[i] = in_strides[i + 1] * t.shape.dims[i + 1] as usize;
+                    }
+                    
+                    let g_shape = match g {
+                        Value::Scalar(_) => Shape::scalar(),
+                        Value::Tensor(gt) => gt.shape.clone(),
+                    };
+                    let g_dims = &g_shape.dims;
+                    let mut out_coords = vec![0_usize; rank];
+
+                    for &gval in g_elements.iter() {
+                        let mut in_flat = 0_usize;
+                        for ax in 0..rank {
+                            let start = *starts.get(ax).unwrap_or(&0);
+                            in_flat += (out_coords[ax] + start) * in_strides[ax];
+                        }
+                        if in_flat < total {
+                            result_elements[in_flat] = Literal::from_f64(gval);
+                        }
+                        
+                        if rank > 0 {
+                            for ax in (0..rank).rev() {
+                                out_coords[ax] += 1;
+                                if out_coords[ax] < g_dims[ax] as usize {
+                                    break;
+                                }
+                                out_coords[ax] = 0;
+                            }
                         }
                     }
 
@@ -868,34 +893,71 @@ fn vjp(
             }
         }
         Primitive::Concatenate => {
-            // VJP of concatenate: split g into slices for each input
-            let mut grad_inputs = Vec::with_capacity(inputs.len());
-            let mut offset = 0_usize;
-            for inp in inputs {
-                let inp_len = match inp {
-                    Value::Scalar(_) => 1,
-                    Value::Tensor(t) => t.elements.len(),
-                };
-                match g {
-                    Value::Tensor(gt) => {
-                        let slice_elements: Vec<Literal> = gt.elements[offset..offset + inp_len]
-                            .iter()
-                            .map(|l| Literal::from_f64(l.as_f64().unwrap_or(0.0)))
-                            .collect();
-                        let grad_shape = match inp {
-                            Value::Scalar(_) => Shape::scalar(),
-                            Value::Tensor(t) => t.shape.clone(),
-                        };
-                        grad_inputs.push(Value::Tensor(
-                            TensorValue::new(DType::F64, grad_shape, slice_elements)
-                                .map_err(|e| AdError::EvalFailed(e.to_string()))?,
-                        ));
-                    }
-                    Value::Scalar(_) => {
-                        grad_inputs.push(g.clone());
-                    }
+            // VJP of concatenate: split g into slices for each input along the concat dimension
+            let axis: usize = params
+                .get("dimension")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+
+            let g_rank = match g {
+                Value::Tensor(t) => t.shape.rank(),
+                Value::Scalar(_) => 0,
+            };
+
+            if g_rank == 0 {
+                let mut grad_inputs = Vec::with_capacity(inputs.len());
+                for _ in inputs {
+                    grad_inputs.push(g.clone());
                 }
-                offset += inp_len;
+                return Ok(grad_inputs);
+            }
+
+            let g_dims: Vec<usize> = match g {
+                Value::Tensor(t) => t.shape.dims.iter().map(|&d| d as usize).collect(),
+                Value::Scalar(_) => vec![],
+            };
+
+            let mut grad_inputs = Vec::with_capacity(inputs.len());
+            let mut current_offset = 0;
+
+            for inp in inputs {
+                let inp_shape = match inp {
+                    Value::Scalar(_) => Shape::scalar(),
+                    Value::Tensor(t) => t.shape.clone(),
+                };
+
+                let slice_size = inp_shape.dims.get(axis).copied().unwrap_or(1) as usize;
+
+                let mut start_indices = vec![0; g_rank];
+                let mut limit_indices = g_dims.clone();
+
+                start_indices[axis] = current_offset;
+                limit_indices[axis] = current_offset + slice_size;
+
+                let mut slice_params = BTreeMap::new();
+                slice_params.insert(
+                    "start_indices".to_owned(),
+                    start_indices
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+                slice_params.insert(
+                    "limit_indices".to_owned(),
+                    limit_indices
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+
+                let slice_g =
+                    eval_primitive(Primitive::Slice, std::slice::from_ref(g), &slice_params)
+                        .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+
+                grad_inputs.push(slice_g);
+                current_offset += slice_size;
             }
             Ok(grad_inputs)
         }
@@ -915,11 +977,13 @@ fn vjp(
                 TensorValue::new(DType::F64, operand_shape, zero_elements)
                     .map_err(|e| AdError::EvalFailed(e.to_string()))?,
             );
+            let mut scatter_params = BTreeMap::new();
+            scatter_params.insert("mode".to_owned(), "add".to_owned());
             // Scatter gradient into the zero tensor at the gathered indices
             let scattered = eval_primitive(
                 Primitive::Scatter,
                 &[zero_operand, indices.clone(), g.clone()],
-                &BTreeMap::new(),
+                &scatter_params,
             )
             .map_err(|e| AdError::EvalFailed(e.to_string()))?;
             // Gradient w.r.t. operand is the scattered result; indices have no gradient

@@ -871,6 +871,12 @@ fn id_to_atom(id: Id, node_to_var: &BTreeMap<usize, VarId>, expr: &RecExpr<FjLan
 /// Optimize a Jaxpr using equality saturation with algebraic rules.
 #[must_use]
 pub fn optimize_jaxpr(jaxpr: &Jaxpr) -> Jaxpr {
+    if jaxpr.outvars.len() != 1 {
+        // Multi-output extraction requires tuple-nodes or multiple extraction passes.
+        // For V1, we only optimize single-output jaxprs.
+        return jaxpr.clone();
+    }
+
     if jaxpr
         .equations
         .iter()

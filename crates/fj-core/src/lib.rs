@@ -324,7 +324,7 @@ impl TensorValue {
             shape: shape.clone(),
         })?;
 
-        if expected_count as usize != elements.len() {
+        if expected_count != elements.len() as u64 {
             return Err(ValueError::ElementCountMismatch {
                 shape,
                 expected_count,
@@ -422,7 +422,8 @@ impl TensorValue {
                 TensorValue::new(dtype, Shape::vector(slices.len() as u32), elements)
             }
             Value::Tensor(first) => {
-                let mut elements = first.elements.clone();
+                let mut elements = Vec::with_capacity(first.elements.len() * slices.len());
+                elements.extend_from_slice(&first.elements);
                 for value in &slices[1..] {
                     let Value::Tensor(tensor) = value else {
                         return Err(ValueError::MixedAxisStackKinds);
@@ -536,6 +537,9 @@ impl std::fmt::Display for ValueError {
 impl std::error::Error for ValueError {}
 
 fn infer_dtype_from_literals(elements: &[Literal]) -> DType {
+    if elements.is_empty() {
+        return DType::F64;
+    }
     if elements
         .iter()
         .all(|literal| matches!(literal, Literal::I64(_)))

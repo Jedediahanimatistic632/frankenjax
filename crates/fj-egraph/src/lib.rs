@@ -158,10 +158,23 @@ pub fn algebraic_rules() -> Vec<egg::Rewrite<FjLang, ()>> {
         // ── Expm1 / Log1p inverses ─────────────────────────────────────
         rewrite!("expm1-log1p"; "(expm1 (log1p ?a))" => "?a"),
         rewrite!("log1p-expm1"; "(log1p (expm1 ?a))" => "?a"),
+        // ── Reciprocal involution ────────────────────────────────────────
+        rewrite!("reciprocal-reciprocal"; "(reciprocal (reciprocal ?a))" => "?a"),
+        // ── Sign idempotence ────────────────────────────────────────────
+        rewrite!("sign-sign"; "(sign (sign ?a))" => "(sign ?a)"),
+        // ── Trigonometric identities ────────────────────────────────────
+        rewrite!("sin2-cos2"; "(add (mul (sin ?a) (sin ?a)) (mul (cos ?a) (cos ?a)))" => "1"),
+        // ── Hyperbolic identities ───────────────────────────────────────
+        rewrite!("cosh2-sinh2"; "(sub (mul (cosh ?a) (cosh ?a)) (mul (sinh ?a) (sinh ?a)))" => "1"),
+        // ── Logistic identity ───────────────────────────────────────────
+        rewrite!("logistic-complement"; "(add (logistic ?a) (logistic (neg ?a)))" => "1"),
         // ── Select with constant condition ─────────────────────────────
         rewrite!("select-true"; "(select 1 ?a ?b)" => "?a"),
         rewrite!("select-false"; "(select 0 ?a ?b)" => "?b"),
         rewrite!("select-same"; "(select ?c ?a ?a)" => "?a"),
+        // ── Nested select with same condition ──────────────────────────
+        rewrite!("select-nest-true"; "(select ?c (select ?c ?a ?b) ?x)" => "(select ?c ?a ?x)"),
+        rewrite!("select-nest-false"; "(select ?c ?x (select ?c ?a ?b))" => "(select ?c ?x ?b)"),
     ]
 }
 
@@ -1460,6 +1473,294 @@ mod tests {
         let _: RecExpr<FjLang> = "(erf 1)".parse().unwrap();
         let _: RecExpr<FjLang> = "(erfc 1)".parse().unwrap();
         let _: RecExpr<FjLang> = "(select 1 2 3)".parse().unwrap();
+    }
+
+    #[test]
+    fn reciprocal_involution() {
+        // reciprocal(reciprocal(x)) should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Reciprocal,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Reciprocal,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "reciprocal(reciprocal(x)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn sign_idempotent() {
+        // sign(sign(x)) should simplify to sign(x)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Sign,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Sign,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "sign(sign(x)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn sin2_cos2_pythagorean() {
+        // sin(x)^2 + cos(x)^2 should simplify to 1
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(7)],
+            vec![
+                Equation {
+                    primitive: Primitive::Sin,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Cos,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(4)), Atom::Var(VarId(4))],
+                    outputs: smallvec![VarId(5)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(5))],
+                    outputs: smallvec![VarId(7)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "sin^2(x)+cos^2(x) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn cosh2_sinh2_hyperbolic_identity() {
+        // cosh(x)^2 - sinh(x)^2 should simplify to 1
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(7)],
+            vec![
+                Equation {
+                    primitive: Primitive::Cosh,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Sinh,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(4)), Atom::Var(VarId(4))],
+                    outputs: smallvec![VarId(5)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(5))],
+                    outputs: smallvec![VarId(7)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "cosh^2(x)-sinh^2(x) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn logistic_complement_identity() {
+        // logistic(x) + logistic(-x) should simplify to 1
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(5)],
+            vec![
+                Equation {
+                    primitive: Primitive::Logistic,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Logistic,
+                    inputs: smallvec![Atom::Var(VarId(3))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(4))],
+                    outputs: smallvec![VarId(5)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "logistic(x)+logistic(-x) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn select_nested_true_branch() {
+        // select(c, select(c, a, b), x) should simplify to select(c, a, x)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2), VarId(3), VarId(4)],
+            vec![],
+            vec![VarId(6)],
+            vec![
+                Equation {
+                    primitive: Primitive::Select,
+                    inputs: smallvec![
+                        Atom::Var(VarId(1)),
+                        Atom::Var(VarId(2)),
+                        Atom::Var(VarId(3))
+                    ],
+                    outputs: smallvec![VarId(5)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Select,
+                    inputs: smallvec![
+                        Atom::Var(VarId(1)),
+                        Atom::Var(VarId(5)),
+                        Atom::Var(VarId(4))
+                    ],
+                    outputs: smallvec![VarId(6)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "nested select should not increase equation count: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn select_nested_false_branch() {
+        // select(c, x, select(c, a, b)) should simplify to select(c, x, b)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2), VarId(3), VarId(4)],
+            vec![],
+            vec![VarId(6)],
+            vec![
+                Equation {
+                    primitive: Primitive::Select,
+                    inputs: smallvec![
+                        Atom::Var(VarId(1)),
+                        Atom::Var(VarId(2)),
+                        Atom::Var(VarId(3))
+                    ],
+                    outputs: smallvec![VarId(5)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Select,
+                    inputs: smallvec![
+                        Atom::Var(VarId(1)),
+                        Atom::Var(VarId(4)),
+                        Atom::Var(VarId(5))
+                    ],
+                    outputs: smallvec![VarId(6)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "nested select should not increase equation count: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
     }
 
     #[test]

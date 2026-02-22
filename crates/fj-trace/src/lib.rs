@@ -1011,13 +1011,26 @@ fn infer_gather(
 
 fn infer_scatter(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
     let primitive = Primitive::Scatter;
-    if inputs.len() < 2 {
+    if inputs.len() != 3 {
         return Err(TraceError::ShapeInferenceFailed {
             primitive,
-            detail: format!("expected at least 2 inputs, got {}", inputs.len()),
+            detail: format!(
+                "expected 3 inputs (operand, indices, updates), got {}",
+                inputs.len()
+            ),
         });
     }
-    Ok(vec![inputs[0].clone()])
+
+    let operand = &inputs[0];
+    if operand.shape.rank() == 0 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: "cannot scatter into a rank-0 tensor".to_owned(),
+        });
+    }
+
+    // Output shape always matches operand shape
+    Ok(vec![operand.clone()])
 }
 
 fn infer_transpose(
@@ -1889,6 +1902,217 @@ mod tests {
                         Ok(())
                     })
                     .map_err(|err| err.to_string())?;
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    // ── Scatter / Gather shape inference edge cases ──────────────────
+
+    #[test]
+    fn scatter_requires_exactly_three_inputs() {
+        run_logged_test(
+            "scatter_requires_exactly_three_inputs",
+            fj_test_utils::fixture_id_from_json(&("scatter", "arity")).expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape::vector(5),
+                    },
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape::scalar(),
+                    },
+                ]);
+                // Only 2 inputs — should fail
+                let err = ctx
+                    .process_primitive(
+                        Primitive::Scatter,
+                        &[TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    )
+                    .unwrap_err();
+                assert!(
+                    format!("{err:?}").contains("expected 3 inputs"),
+                    "error should mention arity: {err:?}"
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn scatter_rejects_rank0_operand() {
+        run_logged_test(
+            "scatter_rejects_rank0_operand",
+            fj_test_utils::fixture_id_from_json(&("scatter", "rank0")).expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape::scalar(),
+                    },
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape::scalar(),
+                    },
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape::scalar(),
+                    },
+                ]);
+                let err = ctx
+                    .process_primitive(
+                        Primitive::Scatter,
+                        &[TracerId(1), TracerId(2), TracerId(3)],
+                        BTreeMap::new(),
+                    )
+                    .unwrap_err();
+                assert!(
+                    format!("{err:?}").contains("rank-0"),
+                    "error should mention rank-0: {err:?}"
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn scatter_output_shape_matches_operand() {
+        run_logged_test(
+            "scatter_output_shape_matches_operand",
+            fj_test_utils::fixture_id_from_json(&("scatter", "shape")).expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![3, 4] },
+                    },
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape::vector(2),
+                    },
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![2, 4] },
+                    },
+                ]);
+                let out = ctx
+                    .process_primitive(
+                        Primitive::Scatter,
+                        &[TracerId(1), TracerId(2), TracerId(3)],
+                        BTreeMap::new(),
+                    )
+                    .expect("scatter should succeed");
+                assert_eq!(out.len(), 1);
+                let out_aval = ctx.tracer_aval(out[0]).unwrap();
+                assert_eq!(
+                    out_aval.shape.dims,
+                    vec![3, 4],
+                    "scatter output should match operand shape"
+                );
+                assert_eq!(out_aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn gather_output_shape_with_slice_sizes() {
+        run_logged_test(
+            "gather_output_shape_with_slice_sizes",
+            fj_test_utils::fixture_id_from_json(&("gather", "slice_sizes"))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![10, 8] },
+                    },
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape::vector(3),
+                    },
+                ]);
+                let mut params = BTreeMap::new();
+                params.insert("slice_sizes".to_owned(), "1,4".to_owned());
+                let out = ctx
+                    .process_primitive(Primitive::Gather, &[TracerId(1), TracerId(2)], params)
+                    .expect("gather should succeed");
+                assert_eq!(out.len(), 1);
+                let out_aval = ctx.tracer_aval(out[0]).unwrap();
+                // Output shape = indices.shape ++ slice_sizes = [3] ++ [1,4] = [3,1,4]
+                assert_eq!(
+                    out_aval.shape.dims,
+                    vec![3, 1, 4],
+                    "gather output should be indices.shape ++ slice_sizes"
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn gather_default_slice_sizes_are_ones() {
+        run_logged_test(
+            "gather_default_slice_sizes_are_ones",
+            fj_test_utils::fixture_id_from_json(&("gather", "default_slices"))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![5, 3] },
+                    },
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape::vector(2),
+                    },
+                ]);
+                let out = ctx
+                    .process_primitive(
+                        Primitive::Gather,
+                        &[TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    )
+                    .expect("gather should succeed with default slice_sizes");
+                let out_aval = ctx.tracer_aval(out[0]).unwrap();
+                // Default slice_sizes = [1,1] for rank-2 operand
+                // Output = indices.shape ++ [1,1] = [2,1,1]
+                assert_eq!(
+                    out_aval.shape.dims,
+                    vec![2, 1, 1],
+                    "default slice_sizes should be [1,1] for rank-2"
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn gather_requires_two_inputs() {
+        run_logged_test(
+            "gather_requires_two_inputs",
+            fj_test_utils::fixture_id_from_json(&("gather", "arity")).expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape::vector(5),
+                }]);
+                let err = ctx
+                    .process_primitive(Primitive::Gather, &[TracerId(1)], BTreeMap::new())
+                    .unwrap_err();
+                assert!(
+                    format!("{err:?}").contains("at least 2 inputs"),
+                    "error should mention arity: {err:?}"
+                );
                 Ok(Vec::new())
             },
         );

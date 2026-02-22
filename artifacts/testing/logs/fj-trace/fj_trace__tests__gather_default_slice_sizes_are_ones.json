@@ -1,7 +1,7 @@
 {
   "schema_version": "frankenjax.test-log.v1",
-  "test_id": "fj_trace::tests::trace_to_jaxpr_validates_in_and_out_avals",
-  "fixture_id": "ad2a2ea11954b49e119c99f7ae94aa94ec063b6f149b3fb534ed1983d8fd6094",
+  "test_id": "fj_trace::tests::gather_default_slice_sizes_are_ones",
+  "fixture_id": "de35d66befa23c92869f310f417f31427daf68e8981e7b44446183c923ae6498",
   "seed": null,
   "mode": "strict",
   "env": {
@@ -12,14 +12,14 @@
   },
   "artifact_refs": [
     "packet:FJ-P2C-001",
-    "replay: cargo test -p fj-trace --lib fj_trace::tests::trace_to_jaxpr_validates_in_and_out_avals -- --exact --nocapture",
-    "/data/projects/frankenjax/crates/fj-trace/../../artifacts/testing/logs/fj-trace/fj_trace__tests__trace_to_jaxpr_validates_in_and_out_avals.json"
+    "replay: cargo test -p fj-trace --lib fj_trace::tests::gather_default_slice_sizes_are_ones -- --exact --nocapture",
+    "/data/projects/frankenjax/crates/fj-trace/../../artifacts/testing/logs/fj-trace/fj_trace__tests__gather_default_slice_sizes_are_ones.json"
   ],
   "result": "pass",
-  "duration_ms": 68,
+  "duration_ms": 69,
   "details": "packet_id=FJ-P2C-001;suite_id=fj-trace;result=pass",
   "phase_timings": {
-    "setup_ms": 68,
+    "setup_ms": 69,
     "execute_ms": 0,
     "verify_ms": 0,
     "teardown_ms": 0

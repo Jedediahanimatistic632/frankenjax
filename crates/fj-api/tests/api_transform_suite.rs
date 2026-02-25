@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 use fj_api::{ApiError, compose, grad, jit, value_and_grad, vmap};
-use fj_core::{CompatibilityMode, ProgramSpec, Transform, Value, build_program};
+use fj_core::{
+    CompatibilityMode, DType, ProgramSpec, Shape, TensorValue, Transform, Value, build_program,
+};
 use fj_test_utils::{TestLogV1, TestMode, TestResult, fixture_id_from_json, test_id};
 use proptest::prelude::*;
 
@@ -61,6 +63,42 @@ fn api_vmap_add_one_strict() {
     log_pass(
         "api_vmap_add_one_strict",
         &("vmap", "add_one", vec![100, 200, 300]),
+    );
+}
+
+#[test]
+fn api_vmap_add_one_rank3_strict() {
+    let jaxpr = build_program(ProgramSpec::AddOne);
+    let tensor_3d = Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape {
+                dims: vec![2, 2, 3],
+            },
+            (1..=12).map(fj_core::Literal::I64).collect(),
+        )
+        .expect("3d tensor should build"),
+    );
+    let result = vmap(jaxpr)
+        .call(vec![tensor_3d])
+        .expect("vmap rank3 should succeed");
+    let t = result[0].as_tensor().expect("tensor");
+    assert_eq!(
+        t.shape,
+        Shape {
+            dims: vec![2, 2, 3]
+        }
+    );
+    let vals: Vec<i64> = t
+        .elements
+        .iter()
+        .map(|l| l.as_i64().expect("i64"))
+        .collect();
+    let expected: Vec<i64> = (2..=13).collect();
+    assert_eq!(vals, expected);
+    log_pass(
+        "api_vmap_add_one_rank3_strict",
+        &("vmap", "add_one_rank3", vec![2_u32, 2_u32, 3_u32]),
     );
 }
 
@@ -136,6 +174,57 @@ fn stacking_vmap_grad() {
 }
 
 #[test]
+fn stacking_vmap_vmap_vmap_grad_rank3() {
+    let jaxpr = build_program(ProgramSpec::Square);
+    let input_vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let tensor_3d = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape {
+                dims: vec![2, 2, 2],
+            },
+            input_vals
+                .iter()
+                .copied()
+                .map(fj_core::Literal::from_f64)
+                .collect(),
+        )
+        .expect("3d tensor should build"),
+    );
+    let result = compose(
+        jaxpr,
+        vec![
+            Transform::Vmap,
+            Transform::Vmap,
+            Transform::Vmap,
+            Transform::Grad,
+        ],
+    )
+    .call(vec![tensor_3d])
+    .expect("vmap(vmap(vmap(grad))) should succeed on rank3");
+    let t = result[0].as_tensor().expect("tensor");
+    assert_eq!(
+        t.shape,
+        Shape {
+            dims: vec![2, 2, 2]
+        }
+    );
+    let vals = t.to_f64_vec().expect("f64 vec");
+    let expected: Vec<f64> = input_vals.iter().map(|x| 2.0 * x).collect();
+    assert_eq!(vals.len(), expected.len());
+    for (i, (actual, expected)) in vals.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (actual - expected).abs() < 1e-3,
+            "index {i}: expected {expected}, got {actual}"
+        );
+    }
+    log_pass(
+        "stacking_vmap_vmap_vmap_grad_rank3",
+        &("vmap3_grad", "square", vec![2_u32, 2_u32, 2_u32]),
+    );
+}
+
+#[test]
 fn stacking_compose_jit_vmap_grad() {
     let jaxpr = build_program(ProgramSpec::Square);
     let result = compose(
@@ -174,6 +263,36 @@ fn error_grad_vector_input() {
         other => panic!("expected GradRequiresScalar, got: {other}"),
     }
     log_pass("error_grad_vector_input", &("error", "grad_vector"));
+}
+
+#[test]
+fn error_grad_rank3_input() {
+    let jaxpr = build_program(ProgramSpec::Square);
+    let tensor_3d = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape {
+                dims: vec![2, 2, 2],
+            },
+            (1..=8)
+                .map(|v| fj_core::Literal::from_f64(v as f64))
+                .collect(),
+        )
+        .expect("3d tensor should build"),
+    );
+    let err = grad(jaxpr)
+        .call(vec![tensor_3d])
+        .expect_err("grad with rank3 input should fail");
+    match &err {
+        ApiError::GradRequiresScalar { detail } => {
+            assert!(
+                detail.contains("scalar"),
+                "error should mention scalar: {detail}"
+            );
+        }
+        other => panic!("expected GradRequiresScalar, got: {other}"),
+    }
+    log_pass("error_grad_rank3_input", &("error", "grad_rank3"));
 }
 
 #[test]

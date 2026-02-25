@@ -1062,6 +1062,94 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_triple_vmap_grad_square_rank3_tensor() {
+        let input_vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let tensor_3d = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![2, 2, 2],
+                },
+                input_vals
+                    .iter()
+                    .copied()
+                    .map(fj_core::Literal::from_f64)
+                    .collect(),
+            )
+            .expect("3d tensor should build"),
+        );
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(
+                ProgramSpec::Square,
+                &[
+                    Transform::Vmap,
+                    Transform::Vmap,
+                    Transform::Vmap,
+                    Transform::Grad,
+                ],
+            ),
+            args: vec![tensor_3d],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("dispatch triple vmap(grad(square)) should succeed");
+
+        let output = response.outputs[0]
+            .as_tensor()
+            .expect("triple vmap grad output should be tensor");
+        assert_eq!(
+            output.shape,
+            Shape {
+                dims: vec![2, 2, 2]
+            }
+        );
+        let grads = output.to_f64_vec().expect("output should be f64 tensor");
+        let expected: Vec<f64> = input_vals.iter().map(|x| 2.0 * x).collect();
+        assert_eq!(grads.len(), expected.len());
+        for (idx, (actual, expected)) in grads.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "index {idx}: expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_grad_square_rank3_tensor_rejects_non_scalar_input() {
+        let tensor_3d = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![2, 2, 2],
+                },
+                (1..=8)
+                    .map(|v| fj_core::Literal::from_f64(v as f64))
+                    .collect(),
+            )
+            .expect("3d tensor should build"),
+        );
+        let err = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Square, &[Transform::Grad]),
+            args: vec![tensor_3d],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect_err("grad(square) on rank3 input should fail");
+
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("scalar"),
+            "rank3 grad failure should mention scalar requirement, got: {err_msg}"
+        );
+    }
+
+    #[test]
     fn dispatch_grad_sin_with_jit() {
         // grad(jit(sin(x))) = cos(x) at x=0 => 1.0
         let response = dispatch(DispatchRequest {

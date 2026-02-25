@@ -17,8 +17,8 @@ use arithmetic::{
 use comparison::eval_comparison;
 use reduction::eval_reduce_axes;
 use tensor_ops::{
-    eval_broadcast_in_dim, eval_concatenate, eval_dynamic_slice, eval_gather, eval_iota,
-    eval_pad, eval_reshape, eval_scatter, eval_slice, eval_transpose,
+    eval_broadcast_in_dim, eval_concatenate, eval_dynamic_slice, eval_gather, eval_iota, eval_pad,
+    eval_reshape, eval_scatter, eval_slice, eval_transpose,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,11 +692,10 @@ mod tests {
         let params = pad_params("1,0", "0,1", "0,1");
         let out = eval_primitive(Primitive::Pad, &[input, Value::scalar_i64(0)], &params).unwrap();
         let out_tensor = out.as_tensor().expect("pad output should be tensor");
-        assert_eq!(out_tensor.shape.dims, vec![3, 5]);
+        assert_eq!(out_tensor.shape.dims, vec![3, 4]);
         assert_eq!(
             out_tensor.elements,
             vec![
-                Literal::I64(0),
                 Literal::I64(0),
                 Literal::I64(0),
                 Literal::I64(0),
@@ -705,11 +704,9 @@ mod tests {
                 Literal::I64(0),
                 Literal::I64(2),
                 Literal::I64(0),
-                Literal::I64(0),
                 Literal::I64(3),
                 Literal::I64(0),
                 Literal::I64(4),
-                Literal::I64(0),
                 Literal::I64(0),
             ]
         );

@@ -2921,6 +2921,146 @@ mod tests {
             panic!("expected tensor");
         }
     }
+
+    // ── Conv 2D tests ────────────────────────────────────────────
+
+    #[test]
+    fn conv_2d_valid_single_channel() {
+        // lhs=[1, 3, 3, 1], rhs=[2, 2, 1, 1], valid, stride=1
+        // Input 3x3 image:
+        // 1 2 3
+        // 4 5 6
+        // 7 8 9
+        // Kernel 2x2 (all ones):
+        // 1 1
+        // 1 1
+        // Output 2x2: [1+2+4+5, 2+3+5+6, 4+5+7+8, 5+6+8+9] = [12, 16, 24, 28]
+        let lhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 3, 3, 1],
+                },
+                (1..=9).map(|i| Literal::from_f64(i as f64)).collect(),
+            )
+            .unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![2, 2, 1, 1],
+                },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("valid", "1")).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![1, 2, 2, 1]);
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![12.0, 16.0, 24.0, 28.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn conv_2d_same_padding() {
+        // lhs=[1, 3, 3, 1], rhs=[3, 3, 1, 1], same padding
+        // With same padding, output should have same spatial dims as input: 3x3
+        let lhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 3, 3, 1],
+                },
+                (1..=9).map(|i| Literal::from_f64(i as f64)).collect(),
+            )
+            .unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![3, 3, 1, 1],
+                },
+                vec![Literal::from_f64(1.0); 9],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("same", "1")).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![1, 3, 3, 1]);
+            // Center element: sum of all 9 values = 45
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert!((vals[4] - 45.0).abs() < 1e-10, "center = {}", vals[4]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn conv_2d_multi_channel() {
+        // lhs=[1, 2, 2, 2] (2x2 image, 2 channels)
+        // rhs=[1, 1, 2, 3] (1x1 kernel, 2 c_in, 3 c_out) -- pointwise conv
+        // This is effectively a dense transform of each pixel's channel vector
+        let lhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 2, 2, 2],
+                },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0), // pixel (0,0): [1,2]
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(4.0), // pixel (0,1): [3,4]
+                    Literal::from_f64(5.0),
+                    Literal::from_f64(6.0), // pixel (1,0): [5,6]
+                    Literal::from_f64(7.0),
+                    Literal::from_f64(8.0), // pixel (1,1): [7,8]
+                ],
+            )
+            .unwrap(),
+        );
+        // kernel: 1x1, c_in=2, c_out=3
+        // rhs layout: [KH=1, KW=1, C_in=2, C_out=3]
+        // W = [[1,0,1], [0,1,1]] -> output channels: ch0=ci0, ch1=ci1, ch2=ci0+ci1
+        let rhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 1, 2, 3],
+                },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(0.0),
+                    Literal::from_f64(1.0), // ci=0: [1,0,1]
+                    Literal::from_f64(0.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0), // ci=1: [0,1,1]
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("valid", "1")).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![1, 2, 2, 3]);
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            // pixel (0,0): [1,2] -> [1*1+2*0, 1*0+2*1, 1*1+2*1] = [1, 2, 3]
+            assert_eq!(vals[0..3], [1.0, 2.0, 3.0]);
+            // pixel (0,1): [3,4] -> [3, 4, 7]
+            assert_eq!(vals[3..6], [3.0, 4.0, 7.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
 }
 
 #[cfg(test)]

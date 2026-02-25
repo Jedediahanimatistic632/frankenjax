@@ -1668,11 +1668,37 @@ pub(crate) fn eval_conv(
         });
     }
 
-    // Only 1D conv for now: lhs=[N, W, C_in], rhs=[K, C_in, C_out]
-    if lhs_rank != 3 {
+    if lhs_rank > 4 {
         return Err(EvalError::Unsupported {
             primitive,
-            detail: format!("only 1D conv supported (rank 3), got rank {lhs_rank}"),
+            detail: format!("conv supports rank 3 (1D) and rank 4 (2D), got rank {lhs_rank}"),
+        });
+    }
+
+    let padding_mode = params.get("padding").map(String::as_str).unwrap_or("valid");
+
+    if lhs_rank == 3 {
+        eval_conv_1d(primitive, lhs, rhs, params, padding_mode)
+    } else {
+        eval_conv_2d(primitive, lhs, rhs, params, padding_mode)
+    }
+}
+
+/// 1D convolution: lhs=[N, W, C_in], rhs=[K, C_in, C_out]
+fn eval_conv_1d(
+    primitive: Primitive,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    params: &BTreeMap<String, String>,
+    padding_mode: &str,
+) -> Result<Value, EvalError> {
+    if rhs.shape.rank() != 3 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "1D conv kernel must have rank 3 [K, C_in, C_out], got rank {}",
+                rhs.shape.rank()
+            ),
         });
     }
 
@@ -1696,16 +1722,13 @@ pub(crate) fn eval_conv(
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(1);
 
-    let padding_mode = params.get("padding").map(String::as_str).unwrap_or("valid");
-
     let (out_w, pad_left) = match padding_mode {
         "same" | "SAME" => {
-            let out_w = (width + stride - 1) / stride;
+            let out_w = width.div_ceil(stride);
             let pad_total = ((out_w - 1) * stride + kernel_w).saturating_sub(width);
             (out_w, pad_total / 2)
         }
         _ => {
-            // "valid"
             if width < kernel_w {
                 return Err(EvalError::Unsupported {
                     primitive,
@@ -1747,4 +1770,133 @@ pub(crate) fn eval_conv(
         },
         elements,
     )?))
+}
+
+/// 2D convolution: lhs=[N, H, W, C_in], rhs=[KH, KW, C_in, C_out]
+fn eval_conv_2d(
+    primitive: Primitive,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    params: &BTreeMap<String, String>,
+    padding_mode: &str,
+) -> Result<Value, EvalError> {
+    let batch = lhs.shape.dims[0] as usize;
+    let height = lhs.shape.dims[1] as usize;
+    let width = lhs.shape.dims[2] as usize;
+    let c_in = lhs.shape.dims[3] as usize;
+
+    let kernel_h = rhs.shape.dims[0] as usize;
+    let kernel_w = rhs.shape.dims[1] as usize;
+    let rhs_c_in = rhs.shape.dims[2] as usize;
+    let c_out = rhs.shape.dims[3] as usize;
+
+    if c_in != rhs_c_in {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("channel mismatch: lhs c_in={c_in}, rhs c_in={rhs_c_in}"),
+        });
+    }
+
+    // Parse strides: either single value or "h,w" pair
+    let (stride_h, stride_w) = parse_stride_pair(params);
+
+    let (out_h, pad_top) = compute_output_and_pad(height, kernel_h, stride_h, padding_mode);
+    let (out_w, pad_left) = compute_output_and_pad(width, kernel_w, stride_w, padding_mode);
+
+    if padding_mode != "same" && padding_mode != "SAME" {
+        if height < kernel_h {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("input height {height} < kernel {kernel_h} with valid padding"),
+            });
+        }
+        if width < kernel_w {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("input width {width} < kernel {kernel_w} with valid padding"),
+            });
+        }
+    }
+
+    let total = batch * out_h * out_w * c_out;
+    let mut elements = Vec::with_capacity(total);
+
+    for n in 0..batch {
+        for oh in 0..out_h {
+            for ow in 0..out_w {
+                for co in 0..c_out {
+                    let mut acc = 0.0_f64;
+                    for kh in 0..kernel_h {
+                        let in_h = (oh * stride_h + kh) as isize - pad_top as isize;
+                        if in_h < 0 || (in_h as usize) >= height {
+                            continue;
+                        }
+                        for kw in 0..kernel_w {
+                            let in_w = (ow * stride_w + kw) as isize - pad_left as isize;
+                            if in_w < 0 || (in_w as usize) >= width {
+                                continue;
+                            }
+                            for ci in 0..c_in {
+                                let lhs_idx = n * height * width * c_in
+                                    + (in_h as usize) * width * c_in
+                                    + (in_w as usize) * c_in
+                                    + ci;
+                                let rhs_idx = kh * kernel_w * c_in * c_out
+                                    + kw * c_in * c_out
+                                    + ci * c_out
+                                    + co;
+                                let lhs_val = lhs.elements[lhs_idx].as_f64().unwrap_or(0.0);
+                                let rhs_val = rhs.elements[rhs_idx].as_f64().unwrap_or(0.0);
+                                acc += lhs_val * rhs_val;
+                            }
+                        }
+                    }
+                    elements.push(Literal::from_f64(acc));
+                }
+            }
+        }
+    }
+
+    Ok(Value::Tensor(TensorValue::new(
+        DType::F64,
+        Shape {
+            dims: vec![batch as u32, out_h as u32, out_w as u32, c_out as u32],
+        },
+        elements,
+    )?))
+}
+
+fn parse_stride_pair(params: &BTreeMap<String, String>) -> (usize, usize) {
+    let strides_str = params.get("strides").map(String::as_str).unwrap_or("1");
+    let parts: Vec<&str> = strides_str.split(',').collect();
+    if parts.len() >= 2 {
+        let sh = parts[0].trim().parse().unwrap_or(1);
+        let sw = parts[1].trim().parse().unwrap_or(1);
+        (sh, sw)
+    } else {
+        let s = parts[0].trim().parse().unwrap_or(1);
+        (s, s)
+    }
+}
+
+fn compute_output_and_pad(
+    input_size: usize,
+    kernel_size: usize,
+    stride: usize,
+    padding_mode: &str,
+) -> (usize, usize) {
+    match padding_mode {
+        "same" | "SAME" => {
+            let out = input_size.div_ceil(stride);
+            let pad_total = ((out - 1) * stride + kernel_size).saturating_sub(input_size);
+            (out, pad_total / 2)
+        }
+        _ => {
+            if input_size < kernel_size {
+                (0, 0)
+            } else {
+                ((input_size - kernel_size) / stride + 1, 0)
+            }
+        }
+    }
 }

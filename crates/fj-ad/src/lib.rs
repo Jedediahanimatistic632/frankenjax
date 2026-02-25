@@ -1215,33 +1215,627 @@ fn vjp(
             // VJP: g_operand = g with update region zeroed out,
             //       g_update = slice of g at the start positions.
             // Start indices have no gradient (discrete).
-            // Simplified: return zero for both operand and update.
-            Ok(vec![Value::scalar_f64(0.0), Value::scalar_f64(0.0)])
+            dynamic_update_slice_vjp(inputs, g)
         }
         Primitive::Cumsum => {
-            // VJP of cumsum is reverse cumsum of gradient
-            // For scalar simplification: pass gradient through
-            Ok(vec![g.clone()])
+            // VJP of cumsum is reverse cumsum of gradient.
+            // For scalar: pass through (cumsum of scalar = scalar).
+            // For tensor: reverse cumulative sum along the cumsum axis.
+            match g {
+                Value::Scalar(_) => Ok(vec![g.clone()]),
+                Value::Tensor(gt) => {
+                    let axis: usize = params
+                        .get("axis")
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                    let dims: Vec<usize> = gt.shape.dims.iter().map(|&d| d as usize).collect();
+                    let rank = dims.len();
+                    let g_vals: Vec<f64> = gt
+                        .elements
+                        .iter()
+                        .map(|l| l.as_f64().unwrap_or(0.0))
+                        .collect();
+                    let total = g_vals.len();
+                    let mut result = vec![0.0_f64; total];
+
+                    // Compute strides for ND indexing
+                    let mut strides = vec![1usize; rank];
+                    for i in (0..rank - 1).rev() {
+                        strides[i] = strides[i + 1] * dims[i + 1];
+                    }
+
+                    // For each position along the non-cumsum axes, do reverse cumsum
+                    let axis_len = dims[axis];
+                    let axis_stride = strides[axis];
+                    let outer_count = total / axis_len;
+
+                    for outer in 0..outer_count {
+                        // Compute base index: skip the axis dimension
+                        let mut base = 0;
+                        let mut rem = outer;
+                        for d in (0..rank).rev() {
+                            if d == axis {
+                                continue;
+                            }
+                            base += (rem % dims[d]) * strides[d];
+                            rem /= dims[d];
+                        }
+
+                        // Reverse cumulative sum along axis
+                        let mut running = 0.0;
+                        for i in (0..axis_len).rev() {
+                            let idx = base + i * axis_stride;
+                            running += g_vals[idx];
+                            result[idx] = running;
+                        }
+                    }
+
+                    Ok(vec![Value::Tensor(
+                        TensorValue::new(
+                            DType::F64,
+                            gt.shape.clone(),
+                            result.into_iter().map(Literal::from_f64).collect(),
+                        )
+                        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                    )])
+                }
+            }
         }
         Primitive::Cumprod => {
-            // VJP of cumprod requires the forward output; simplified for scalars
-            Ok(vec![g.clone()])
+            // VJP of cumprod: grad_x[i] = sum_{j>=i} g[j] * cumprod[j] / x[i]
+            // For scalar: pass through (cumprod of scalar = scalar).
+            // For tensor: use the formula with forward cumprod values.
+            match g {
+                Value::Scalar(_) => Ok(vec![g.clone()]),
+                Value::Tensor(gt) => {
+                    let x = &inputs[0];
+                    let x_tensor = match x {
+                        Value::Tensor(t) => t,
+                        Value::Scalar(_) => return Ok(vec![g.clone()]),
+                    };
+                    let axis: usize = params
+                        .get("axis")
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                    let dims: Vec<usize> = gt.shape.dims.iter().map(|&d| d as usize).collect();
+                    let rank = dims.len();
+                    let g_vals: Vec<f64> = gt
+                        .elements
+                        .iter()
+                        .map(|l| l.as_f64().unwrap_or(0.0))
+                        .collect();
+                    let x_vals: Vec<f64> = x_tensor
+                        .elements
+                        .iter()
+                        .map(|l| l.as_f64().unwrap_or(0.0))
+                        .collect();
+                    let total = g_vals.len();
+                    let mut result = vec![0.0_f64; total];
+
+                    let mut strides = vec![1usize; rank];
+                    for i in (0..rank - 1).rev() {
+                        strides[i] = strides[i + 1] * dims[i + 1];
+                    }
+
+                    let axis_len = dims[axis];
+                    let axis_stride = strides[axis];
+                    let outer_count = total / axis_len;
+
+                    for outer in 0..outer_count {
+                        let mut base = 0;
+                        let mut rem = outer;
+                        for d in (0..rank).rev() {
+                            if d == axis {
+                                continue;
+                            }
+                            base += (rem % dims[d]) * strides[d];
+                            rem /= dims[d];
+                        }
+
+                        // Forward cumprod for this slice
+                        let mut cumprod = vec![0.0_f64; axis_len];
+                        let mut running = 1.0;
+                        for i in 0..axis_len {
+                            running *= x_vals[base + i * axis_stride];
+                            cumprod[i] = running;
+                        }
+
+                        // grad_x[i] = sum_{j>=i} g[j] * cumprod[j] / x[i]
+                        // = (1/x[i]) * sum_{j>=i} g[j] * cumprod[j]
+                        // Use reverse cumsum of (g * cumprod), then divide by x
+                        let mut suffix_sum = 0.0;
+                        for i in (0..axis_len).rev() {
+                            let idx = base + i * axis_stride;
+                            suffix_sum += g_vals[idx] * cumprod[i];
+                            let xi = x_vals[idx];
+                            if xi.abs() > f64::EPSILON {
+                                result[idx] = suffix_sum / xi;
+                            }
+                            // If x[i] == 0, gradient is 0 (avoid division by zero)
+                        }
+                    }
+
+                    Ok(vec![Value::Tensor(
+                        TensorValue::new(
+                            DType::F64,
+                            gt.shape.clone(),
+                            result.into_iter().map(Literal::from_f64).collect(),
+                        )
+                        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                    )])
+                }
+            }
         }
         Primitive::Sort => {
             // VJP of sort: unsort the gradient using the argsort permutation.
-            // Simplified: pass gradient through.
-            Ok(vec![g.clone()])
+            // Must respect the `axis` parameter — sort operates along a specific axis.
+            let x = &inputs[0];
+            match (x, g) {
+                (Value::Scalar(_), _) => Ok(vec![g.clone()]),
+                (Value::Tensor(xt), Value::Tensor(gt)) => {
+                    let rank = xt.shape.rank();
+                    if rank == 0 {
+                        return Ok(vec![g.clone()]);
+                    }
+                    let axis: usize = params
+                        .get("axis")
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(rank - 1);
+
+                    let x_vals: Vec<f64> = xt
+                        .elements
+                        .iter()
+                        .map(|l| l.as_f64().unwrap_or(0.0))
+                        .collect();
+                    let g_vals: Vec<f64> = gt
+                        .elements
+                        .iter()
+                        .map(|l| l.as_f64().unwrap_or(0.0))
+                        .collect();
+
+                    let dims: Vec<usize> =
+                        xt.shape.dims.iter().map(|&d| d as usize).collect();
+                    let mut strides = vec![1usize; rank];
+                    for i in (0..rank - 1).rev() {
+                        strides[i] = strides[i + 1] * dims[i + 1];
+                    }
+                    let axis_dim = dims[axis];
+                    let axis_stride = strides[axis];
+                    let total = x_vals.len();
+                    let outer_count = total / axis_dim;
+
+                    let mut result = vec![0.0_f64; total];
+
+                    let descending = params
+                        .get("descending")
+                        .map(|s| s.trim() == "true")
+                        .unwrap_or(false);
+
+                    for outer in 0..outer_count {
+                        // Compute base flat index (same pattern as forward sort)
+                        let mut base = 0usize;
+                        let mut rem = outer;
+                        for ax in (0..rank).rev() {
+                            if ax == axis {
+                                continue;
+                            }
+                            base += (rem % dims[ax]) * strides[ax];
+                            rem /= dims[ax];
+                        }
+
+                        // Extract the slice along the axis and argsort it
+                        let mut indexed: Vec<(usize, f64)> = (0..axis_dim)
+                            .map(|i| (i, x_vals[base + i * axis_stride]))
+                            .collect();
+                        if descending {
+                            indexed.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        } else {
+                            indexed.sort_by(|a, b| {
+                                a.1.partial_cmp(&b.1)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+
+                        // Inverse permutation: unsort the gradient
+                        for (sorted_pos, &(orig_idx, _)) in indexed.iter().enumerate() {
+                            let g_flat = base + sorted_pos * axis_stride;
+                            let result_flat = base + orig_idx * axis_stride;
+                            result[result_flat] = g_vals[g_flat];
+                        }
+                    }
+
+                    Ok(vec![Value::Tensor(
+                        TensorValue::new(
+                            DType::F64,
+                            xt.shape.clone(),
+                            result.into_iter().map(Literal::from_f64).collect(),
+                        )
+                        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                    )])
+                }
+                _ => Ok(vec![g.clone()]),
+            }
         }
         Primitive::Argsort => {
             // Argsort is not differentiable (returns integer indices).
             Ok(vec![Value::scalar_f64(0.0)])
         }
         Primitive::Conv => {
-            // Conv VJP: simplified — return zeros for both lhs and rhs gradients.
-            // Full implementation would do transposed convolution.
-            Ok(vec![Value::scalar_f64(0.0), Value::scalar_f64(0.0)])
+            // Conv 1D VJP for layout lhs=[N, W, C_in], rhs=[K, C_in, C_out], out=[N, W_out, C_out]
+            // grad_lhs: convolve g with flipped kernel (transposed convolution)
+            // grad_rhs: cross-correlate input with g
+            conv_vjp(inputs, g, params)
         }
     }
+}
+
+/// DynamicUpdateSlice VJP: route gradients properly.
+///
+/// Inputs: [operand, update, start_0, start_1, ..., start_{rank-1}]
+/// g_operand = g with the update region zeroed out
+/// g_update = slice of g at the start positions with update's shape
+/// Start indices have zero gradient (discrete).
+fn dynamic_update_slice_vjp(inputs: &[Value], g: &Value) -> Result<Vec<Value>, AdError> {
+    let g_tensor = match g {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            // Scalar case: gradient flows to operand, zero to update
+            let n_starts = inputs.len().saturating_sub(2);
+            let mut result = vec![g.clone(), Value::scalar_f64(0.0)];
+            result.extend(std::iter::repeat_n(Value::scalar_f64(0.0), n_starts));
+            return Ok(result);
+        }
+    };
+
+    let update = match &inputs[1] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            let n_starts = inputs.len().saturating_sub(2);
+            let mut result = vec![g.clone(), Value::scalar_f64(0.0)];
+            result.extend(std::iter::repeat_n(Value::scalar_f64(0.0), n_starts));
+            return Ok(result);
+        }
+    };
+
+    let rank = g_tensor.shape.rank();
+
+    // Parse start indices (same clamping logic as forward pass)
+    let mut starts = Vec::with_capacity(rank);
+    for ax in 0..rank {
+        let start_val = match &inputs[2 + ax] {
+            Value::Scalar(lit) => {
+                let raw = match lit {
+                    Literal::I64(v) => *v,
+                    Literal::F64Bits(b) => f64::from_bits(*b) as i64,
+                    Literal::Bool(b) => i64::from(*b),
+                };
+                let dim = g_tensor.shape.dims[ax] as i64;
+                let upd_size = update.shape.dims[ax] as i64;
+                raw.max(0).min(dim - upd_size) as usize
+            }
+            _ => 0,
+        };
+        starts.push(start_val);
+    }
+
+    // g_operand: copy of g with the update region zeroed out
+    let mut g_op_elems: Vec<f64> = g_tensor
+        .elements
+        .iter()
+        .map(|l| l.as_f64().unwrap_or(0.0))
+        .collect();
+
+    // g_update: slice of g at the start positions
+    let upd_dims: Vec<usize> = update.shape.dims.iter().map(|&d| d as usize).collect();
+    let g_dims: Vec<usize> = g_tensor.shape.dims.iter().map(|&d| d as usize).collect();
+    let upd_total: usize = upd_dims.iter().product();
+    let mut g_upd_elems = Vec::with_capacity(upd_total);
+
+    // Iterate over update indices
+    fn iterate_nd(
+        dims: &[usize],
+        starts: &[usize],
+        g_dims: &[usize],
+        g_op_elems: &mut [f64],
+        g_elems: &[f64],
+        g_upd_elems: &mut Vec<f64>,
+    ) {
+        let rank = dims.len();
+        let total: usize = dims.iter().product();
+        for flat_idx in 0..total {
+            // Convert flat index to ND coordinates in update space
+            let mut remaining = flat_idx;
+            let mut g_flat = 0usize;
+            let mut stride = 1;
+            for ax in (0..rank).rev() {
+                let coord = remaining % dims[ax];
+                remaining /= dims[ax];
+                let g_coord = coord + starts[ax];
+                g_flat += g_coord * stride;
+                stride *= g_dims[ax];
+            }
+            g_upd_elems.push(g_elems[g_flat]);
+            g_op_elems[g_flat] = 0.0;
+        }
+    }
+
+    iterate_nd(
+        &upd_dims,
+        &starts,
+        &g_dims,
+        &mut g_op_elems,
+        &g_tensor
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap_or(0.0))
+            .collect::<Vec<_>>(),
+        &mut g_upd_elems,
+    );
+
+    let grad_operand = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            g_tensor.shape.clone(),
+            g_op_elems.into_iter().map(Literal::from_f64).collect(),
+        )
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+    );
+
+    let grad_update = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            update.shape.clone(),
+            g_upd_elems.into_iter().map(Literal::from_f64).collect(),
+        )
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+    );
+
+    // Return grad for operand, update, and zero for each start index
+    let n_starts = inputs.len().saturating_sub(2);
+    let mut result = vec![grad_operand, grad_update];
+    result.extend(std::iter::repeat_n(Value::scalar_f64(0.0), n_starts));
+    Ok(result)
+}
+
+/// Conv 1D VJP: compute proper gradients for both input and kernel.
+///
+/// Layout: lhs=[N, W, C_in], rhs=[K, C_in, C_out], output=[N, W_out, C_out]
+///
+/// grad_lhs[n, w, ci] = sum_k sum_co g[n, w', co] * rhs[k, ci, co]
+///   where w' = (w - k + pad_left) / stride, only for valid positions
+///
+/// grad_rhs[k, ci, co] = sum_n sum_w' lhs[n, w'*stride + k - pad_left, ci] * g[n, w', co]
+fn conv_vjp(
+    inputs: &[Value],
+    g: &Value,
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, AdError> {
+    let lhs = match &inputs[0] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => return Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])]),
+    };
+    let rhs = match &inputs[1] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => return Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])]),
+    };
+    let g_tensor = match g {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => return Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])]),
+    };
+
+    let rank = lhs.shape.rank();
+    if rank == 3 {
+        conv_vjp_1d(lhs, rhs, g_tensor, params)
+    } else if rank == 4 {
+        conv_vjp_2d(lhs, rhs, g_tensor, params)
+    } else {
+        Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])])
+    }
+}
+
+/// 1D Conv VJP: lhs=[N, W, C_in], rhs=[K, C_in, C_out], g=[N, W_out, C_out]
+fn conv_vjp_1d(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    g_tensor: &TensorValue,
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, AdError> {
+    let batch = lhs.shape.dims[0] as usize;
+    let width = lhs.shape.dims[1] as usize;
+    let c_in = lhs.shape.dims[2] as usize;
+    let kernel_w = rhs.shape.dims[0] as usize;
+    let c_out = rhs.shape.dims[2] as usize;
+    let out_w = g_tensor.shape.dims[1] as usize;
+
+    let stride: usize = params
+        .get("strides")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1);
+
+    let padding_mode = params.get("padding").map(String::as_str).unwrap_or("valid");
+    let pad_left: usize = match padding_mode {
+        "same" | "SAME" => {
+            let padded_out_w = width.div_ceil(stride);
+            let pad_total = ((padded_out_w - 1) * stride + kernel_w).saturating_sub(width);
+            pad_total / 2
+        }
+        _ => 0,
+    };
+
+    let lhs_total = batch * width * c_in;
+    let mut grad_lhs_elems = vec![0.0_f64; lhs_total];
+
+    for n in 0..batch {
+        for w_out in 0..out_w {
+            for k in 0..kernel_w {
+                let in_pos = (w_out * stride + k) as isize - pad_left as isize;
+                if in_pos >= 0 && (in_pos as usize) < width {
+                    let w = in_pos as usize;
+                    for ci in 0..c_in {
+                        let mut acc = 0.0;
+                        for co in 0..c_out {
+                            let g_idx = n * out_w * c_out + w_out * c_out + co;
+                            let rhs_idx = k * c_in * c_out + ci * c_out + co;
+                            acc += g_tensor.elements[g_idx].as_f64().unwrap_or(0.0)
+                                * rhs.elements[rhs_idx].as_f64().unwrap_or(0.0);
+                        }
+                        grad_lhs_elems[n * width * c_in + w * c_in + ci] += acc;
+                    }
+                }
+            }
+        }
+    }
+
+    let rhs_total = kernel_w * c_in * c_out;
+    let mut grad_rhs_elems = vec![0.0_f64; rhs_total];
+
+    for n in 0..batch {
+        for w_out in 0..out_w {
+            for k in 0..kernel_w {
+                let in_pos = (w_out * stride + k) as isize - pad_left as isize;
+                if in_pos >= 0 && (in_pos as usize) < width {
+                    let w = in_pos as usize;
+                    for ci in 0..c_in {
+                        let lhs_val = lhs.elements[n * width * c_in + w * c_in + ci]
+                            .as_f64()
+                            .unwrap_or(0.0);
+                        for co in 0..c_out {
+                            let g_val = g_tensor.elements[n * out_w * c_out + w_out * c_out + co]
+                                .as_f64()
+                                .unwrap_or(0.0);
+                            grad_rhs_elems[k * c_in * c_out + ci * c_out + co] += lhs_val * g_val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    make_conv_grad_pair(&lhs.shape, &rhs.shape, grad_lhs_elems, grad_rhs_elems)
+}
+
+/// 2D Conv VJP: lhs=[N, H, W, C_in], rhs=[KH, KW, C_in, C_out], g=[N, OH, OW, C_out]
+fn conv_vjp_2d(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    g_tensor: &TensorValue,
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, AdError> {
+    let batch = lhs.shape.dims[0] as usize;
+    let height = lhs.shape.dims[1] as usize;
+    let width = lhs.shape.dims[2] as usize;
+    let c_in = lhs.shape.dims[3] as usize;
+    let kernel_h = rhs.shape.dims[0] as usize;
+    let kernel_w = rhs.shape.dims[1] as usize;
+    let c_out = rhs.shape.dims[3] as usize;
+    let out_h = g_tensor.shape.dims[1] as usize;
+    let out_w = g_tensor.shape.dims[2] as usize;
+
+    let strides_str = params.get("strides").map(String::as_str).unwrap_or("1");
+    let parts: Vec<&str> = strides_str.split(',').collect();
+    let (stride_h, stride_w) = if parts.len() >= 2 {
+        (
+            parts[0].trim().parse().unwrap_or(1usize),
+            parts[1].trim().parse().unwrap_or(1usize),
+        )
+    } else {
+        let s: usize = parts[0].trim().parse().unwrap_or(1);
+        (s, s)
+    };
+
+    let padding_mode = params.get("padding").map(String::as_str).unwrap_or("valid");
+    let pad_top: usize = match padding_mode {
+        "same" | "SAME" => {
+            let oh = height.div_ceil(stride_h);
+            ((oh - 1) * stride_h + kernel_h).saturating_sub(height) / 2
+        }
+        _ => 0,
+    };
+    let pad_left: usize = match padding_mode {
+        "same" | "SAME" => {
+            let ow = width.div_ceil(stride_w);
+            ((ow - 1) * stride_w + kernel_w).saturating_sub(width) / 2
+        }
+        _ => 0,
+    };
+
+    let lhs_total = batch * height * width * c_in;
+    let mut grad_lhs_elems = vec![0.0_f64; lhs_total];
+    let rhs_total = kernel_h * kernel_w * c_in * c_out;
+    let mut grad_rhs_elems = vec![0.0_f64; rhs_total];
+
+    for n in 0..batch {
+        for oh in 0..out_h {
+            for ow in 0..out_w {
+                for kh in 0..kernel_h {
+                    let in_h = (oh * stride_h + kh) as isize - pad_top as isize;
+                    if in_h < 0 || (in_h as usize) >= height {
+                        continue;
+                    }
+                    for kw in 0..kernel_w {
+                        let in_w = (ow * stride_w + kw) as isize - pad_left as isize;
+                        if in_w < 0 || (in_w as usize) >= width {
+                            continue;
+                        }
+                        let ih = in_h as usize;
+                        let iw = in_w as usize;
+                        for ci in 0..c_in {
+                            let lhs_idx =
+                                n * height * width * c_in + ih * width * c_in + iw * c_in + ci;
+                            let lhs_val = lhs.elements[lhs_idx].as_f64().unwrap_or(0.0);
+
+                            let mut g_acc = 0.0;
+                            for co in 0..c_out {
+                                let g_idx = n * out_h * out_w * c_out
+                                    + oh * out_w * c_out
+                                    + ow * c_out
+                                    + co;
+                                let rhs_idx = kh * kernel_w * c_in * c_out
+                                    + kw * c_in * c_out
+                                    + ci * c_out
+                                    + co;
+                                let g_val = g_tensor.elements[g_idx].as_f64().unwrap_or(0.0);
+                                let rhs_val = rhs.elements[rhs_idx].as_f64().unwrap_or(0.0);
+                                g_acc += g_val * rhs_val;
+                                grad_rhs_elems[rhs_idx] += lhs_val * g_val;
+                            }
+                            grad_lhs_elems[lhs_idx] += g_acc;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    make_conv_grad_pair(&lhs.shape, &rhs.shape, grad_lhs_elems, grad_rhs_elems)
+}
+
+fn make_conv_grad_pair(
+    lhs_shape: &Shape,
+    rhs_shape: &Shape,
+    grad_lhs_elems: Vec<f64>,
+    grad_rhs_elems: Vec<f64>,
+) -> Result<Vec<Value>, AdError> {
+    let grad_lhs = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            lhs_shape.clone(),
+            grad_lhs_elems.into_iter().map(Literal::from_f64).collect(),
+        )
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+    );
+    let grad_rhs = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            rhs_shape.clone(),
+            grad_rhs_elems.into_iter().map(Literal::from_f64).collect(),
+        )
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+    );
+    Ok(vec![grad_lhs, grad_rhs])
 }
 
 /// Zero out the slices in `g` at the positions indicated by `indices`.
@@ -3080,5 +3674,450 @@ mod tests {
             (result - 5.0).abs() < 1e-10,
             "JVP of pad should pass tangent through, got {result}"
         );
+    }
+
+    // ── Conv 1D VJP tests ──────────────────────────────────────────
+
+    #[test]
+    fn conv_vjp_basic_1d() {
+        // lhs=[1, 3, 1] (batch=1, width=3, c_in=1), rhs=[2, 1, 1] (K=2, c_in=1, c_out=1)
+        // valid padding, stride=1 => output=[1, 2, 1]
+        let lhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 3, 1],
+                },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![2, 1, 1],
+                },
+                vec![Literal::from_f64(0.5), Literal::from_f64(0.5)],
+            )
+            .unwrap(),
+        );
+        // output = [1*0.5+2*0.5, 2*0.5+3*0.5] = [1.5, 2.5]
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 2, 1],
+                },
+                vec![Literal::from_f64(1.0), Literal::from_f64(1.0)],
+            )
+            .unwrap(),
+        );
+
+        let params = BTreeMap::new();
+        let grads = vjp(Primitive::Conv, &[lhs.clone(), rhs.clone()], &g, &params).unwrap();
+
+        // grad_lhs[0,0,0] = g[0,0,0]*rhs[0,0,0] + g[0,1,0]*rhs[1,0,0] (if w_out=1 maps to w=0 via k=1)
+        // Let's verify: for w=0: w_out=0,k=0 => g[0]*0.5 = 0.5
+        //               for w=1: w_out=0,k=1 => g[0]*0.5 + w_out=1,k=0 => g[1]*0.5 = 1.0
+        //               for w=2: w_out=1,k=1 => g[1]*0.5 = 0.5
+        let grad_lhs = match &grads[0] {
+            Value::Tensor(t) => t
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap())
+                .collect::<Vec<_>>(),
+            _ => panic!("expected tensor"),
+        };
+        assert!(
+            (grad_lhs[0] - 0.5).abs() < 1e-10,
+            "grad_lhs[0] = {}, expected 0.5",
+            grad_lhs[0]
+        );
+        assert!(
+            (grad_lhs[1] - 1.0).abs() < 1e-10,
+            "grad_lhs[1] = {}, expected 1.0",
+            grad_lhs[1]
+        );
+        assert!(
+            (grad_lhs[2] - 0.5).abs() < 1e-10,
+            "grad_lhs[2] = {}, expected 0.5",
+            grad_lhs[2]
+        );
+
+        // grad_rhs[k=0] = sum_n sum_w_out lhs[n, w_out*1+0, 0] * g[n, w_out, 0]
+        //                = lhs[0,0,0]*g[0,0,0] + lhs[0,1,0]*g[0,1,0] = 1*1 + 2*1 = 3
+        // grad_rhs[k=1] = lhs[0,1,0]*g[0,0,0] + lhs[0,2,0]*g[0,1,0] = 2*1 + 3*1 = 5
+        let grad_rhs = match &grads[1] {
+            Value::Tensor(t) => t
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap())
+                .collect::<Vec<_>>(),
+            _ => panic!("expected tensor"),
+        };
+        assert!(
+            (grad_rhs[0] - 3.0).abs() < 1e-10,
+            "grad_rhs[0] = {}, expected 3.0",
+            grad_rhs[0]
+        );
+        assert!(
+            (grad_rhs[1] - 5.0).abs() < 1e-10,
+            "grad_rhs[1] = {}, expected 5.0",
+            grad_rhs[1]
+        );
+    }
+
+    #[test]
+    fn conv_vjp_numerical_check() {
+        // Verify conv VJP with numerical differentiation
+        let lhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 4, 1],
+                },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(4.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![2, 1, 1],
+                },
+                vec![Literal::from_f64(1.0), Literal::from_f64(-1.0)],
+            )
+            .unwrap(),
+        );
+
+        let params = BTreeMap::new();
+        let fwd = eval_primitive(Primitive::Conv, &[lhs.clone(), rhs.clone()], &params).unwrap();
+        // output = [1-2, 2-3, 3-4] = [-1, -1, -1], shape [1,3,1]
+        let out_vals: Vec<f64> = match &fwd {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        for v in &out_vals {
+            assert!((*v - (-1.0)).abs() < 1e-10);
+        }
+
+        // Use g = ones => grad check
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 3, 1],
+                },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let grads = vjp(Primitive::Conv, &[lhs, rhs], &g, &params).unwrap();
+        // Verify grad_lhs has correct shape
+        match &grads[0] {
+            Value::Tensor(t) => assert_eq!(t.shape.dims, vec![1, 4, 1]),
+            _ => panic!("expected tensor"),
+        }
+        // Verify grad_rhs has correct shape
+        match &grads[1] {
+            Value::Tensor(t) => assert_eq!(t.shape.dims, vec![2, 1, 1]),
+            _ => panic!("expected tensor"),
+        }
+    }
+
+    // ── DynamicUpdateSlice VJP tests ──────────────────────────────
+
+    #[test]
+    fn dynamic_update_slice_vjp_1d() {
+        // operand = [1, 2, 3, 4, 5], update = [10, 20], start = 1
+        // result = [1, 10, 20, 4, 5]
+        // VJP: grad_operand = g with positions 1,2 zeroed, grad_update = g[1:3]
+        let operand = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![5] },
+                (1..=5).map(|i| Literal::from_f64(i as f64)).collect(),
+            )
+            .unwrap(),
+        );
+        let update = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2] },
+                vec![Literal::from_f64(10.0), Literal::from_f64(20.0)],
+            )
+            .unwrap(),
+        );
+        let start = Value::scalar_i64(1);
+
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![5] },
+                (1..=5)
+                    .map(|i| Literal::from_f64(i as f64 * 10.0))
+                    .collect(),
+            )
+            .unwrap(),
+        );
+
+        let grads = dynamic_update_slice_vjp(&[operand, update, start], &g).unwrap();
+
+        // grad_operand should be [10, 0, 0, 40, 50]
+        let g_op: Vec<f64> = match &grads[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        assert!((g_op[0] - 10.0).abs() < 1e-10);
+        assert!((g_op[1] - 0.0).abs() < 1e-10);
+        assert!((g_op[2] - 0.0).abs() < 1e-10);
+        assert!((g_op[3] - 40.0).abs() < 1e-10);
+        assert!((g_op[4] - 50.0).abs() < 1e-10);
+
+        // grad_update should be [20, 30] (g at positions 1,2)
+        let g_upd: Vec<f64> = match &grads[1] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        assert!((g_upd[0] - 20.0).abs() < 1e-10);
+        assert!((g_upd[1] - 30.0).abs() < 1e-10);
+
+        // Start index gradient should be zero
+        assert_eq!(grads[2].as_f64_scalar().unwrap(), 0.0);
+    }
+
+    // ── Cumsum VJP tests ──────────────────────────────────────────
+
+    #[test]
+    fn cumsum_vjp_1d_tensor() {
+        // x = [1, 2, 3], cumsum = [1, 3, 6]
+        // VJP of cumsum with g = [1, 1, 1] should be reverse cumsum = [3, 2, 1]
+        let x = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("axis".to_string(), "0".to_string());
+
+        let grads = vjp(Primitive::Cumsum, &[x], &g, &params).unwrap();
+        let result: Vec<f64> = match &grads[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        // reverse cumsum of [1,1,1] = [3, 2, 1]
+        assert!((result[0] - 3.0).abs() < 1e-10, "got {}", result[0]);
+        assert!((result[1] - 2.0).abs() < 1e-10, "got {}", result[1]);
+        assert!((result[2] - 1.0).abs() < 1e-10, "got {}", result[2]);
+    }
+
+    #[test]
+    fn cumsum_vjp_with_nonuniform_gradient() {
+        // g = [1, 2, 3], reverse cumsum = [6, 5, 3]
+        let x = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("axis".to_string(), "0".to_string());
+
+        let grads = vjp(Primitive::Cumsum, &[x], &g, &params).unwrap();
+        let result: Vec<f64> = match &grads[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        assert!((result[0] - 6.0).abs() < 1e-10, "got {}", result[0]);
+        assert!((result[1] - 5.0).abs() < 1e-10, "got {}", result[1]);
+        assert!((result[2] - 3.0).abs() < 1e-10, "got {}", result[2]);
+    }
+
+    // ── Cumprod VJP tests ─────────────────────────────────────────
+
+    #[test]
+    fn cumprod_vjp_1d_tensor() {
+        // x = [2, 3, 4], cumprod = [2, 6, 24]
+        // g = [1, 1, 1]
+        // grad_x[i] = sum_{j>=i} g[j] * cumprod[j] / x[i]
+        // grad_x[0] = (1*2 + 1*6 + 1*24) / 2 = 32/2 = 16
+        // grad_x[1] = (1*6 + 1*24) / 3 = 30/3 = 10
+        // grad_x[2] = 1*24 / 4 = 6
+        let x = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(4.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("axis".to_string(), "0".to_string());
+
+        let grads = vjp(Primitive::Cumprod, &[x], &g, &params).unwrap();
+        let result: Vec<f64> = match &grads[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        assert!((result[0] - 16.0).abs() < 1e-10, "got {}", result[0]);
+        assert!((result[1] - 10.0).abs() < 1e-10, "got {}", result[1]);
+        assert!((result[2] - 6.0).abs() < 1e-10, "got {}", result[2]);
+    }
+
+    // ── Sort VJP tests ────────────────────────────────────────────
+
+    #[test]
+    fn sort_vjp_unscrambles_gradient() {
+        // x = [3, 1, 2] => sorted = [1, 2, 3], argsort = [1, 2, 0]
+        // g for sorted output = [10, 20, 30]
+        // Unsort: result[1] = 10, result[2] = 20, result[0] = 30
+        // So grad_x = [30, 10, 20]
+        let x = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(10.0),
+                    Literal::from_f64(20.0),
+                    Literal::from_f64(30.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let params = BTreeMap::new();
+        let grads = vjp(Primitive::Sort, &[x], &g, &params).unwrap();
+        let result: Vec<f64> = match &grads[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        assert!((result[0] - 30.0).abs() < 1e-10, "got {}", result[0]);
+        assert!((result[1] - 10.0).abs() < 1e-10, "got {}", result[1]);
+        assert!((result[2] - 20.0).abs() < 1e-10, "got {}", result[2]);
+    }
+
+    #[test]
+    fn sort_vjp_identity_for_sorted_input() {
+        // Already sorted: x = [1, 2, 3], g = [10, 20, 30]
+        // Argsort = [0, 1, 2] (identity), so unsort is identity too
+        // grad_x = [10, 20, 30]
+        let x = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(10.0),
+                    Literal::from_f64(20.0),
+                    Literal::from_f64(30.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let params = BTreeMap::new();
+        let grads = vjp(Primitive::Sort, &[x], &g, &params).unwrap();
+        let result: Vec<f64> = match &grads[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        assert!((result[0] - 10.0).abs() < 1e-10);
+        assert!((result[1] - 20.0).abs() < 1e-10);
+        assert!((result[2] - 30.0).abs() < 1e-10);
     }
 }

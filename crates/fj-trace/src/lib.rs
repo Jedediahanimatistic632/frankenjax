@@ -636,7 +636,7 @@ impl SimpleTraceContext {
                     let kernel = rhs.shape.dims[i] as usize;
                     let stride = *strides.get(i).unwrap_or(&1);
                     let out_spatial = match padding_mode {
-                        "same" | "SAME" => (spatial + stride - 1) / stride,
+                        "same" | "SAME" => spatial.div_ceil(stride),
                         _ => {
                             // "valid" / default
                             if spatial >= kernel {

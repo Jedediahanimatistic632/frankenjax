@@ -9,7 +9,8 @@ use fj_interpreters::InterpreterError;
 use fj_ledger::{
     ConformalPredictor, DecisionRecord, EvidenceLedger, EvidenceSignal, LedgerEntry, LossMatrix,
 };
-use fj_runtime::backend::{Backend, BackendError};
+use fj_runtime::backend::{Backend, BackendError, BackendRegistry};
+use fj_runtime::device::{DeviceId, DevicePlacement};
 use std::collections::BTreeMap;
 
 // ── Effect Token System ────────────────────────────────────────────
@@ -215,14 +216,6 @@ impl From<TransformExecutionError> for DispatchError {
     }
 }
 
-/// Resolve the named backend, defaulting to CPU.
-fn resolve_backend(name: &str) -> Box<dyn Backend> {
-    match name {
-        "cpu" | "" => Box::new(fj_backend_cpu::CpuBackend::new()),
-        _ => Box::new(fj_backend_cpu::CpuBackend::new()),
-    }
-}
-
 pub fn dispatch(request: DispatchRequest) -> Result<DispatchResponse, DispatchError> {
     let composition_proof = verify_transform_composition(&request.ledger)?;
 
@@ -242,12 +235,16 @@ pub fn dispatch(request: DispatchRequest) -> Result<DispatchResponse, DispatchEr
         effect_ctx.thread_token(transform.as_str());
     }
 
-    let backend = resolve_backend(&request.backend);
+    let backend_registry = BackendRegistry::new(vec![Box::new(fj_backend_cpu::CpuBackend::new())]);
+    let requested_backend = (!request.backend.is_empty()).then_some(request.backend.as_str());
+    let (backend, device, _fell_back) =
+        backend_registry.resolve_with_fallback(&DevicePlacement::Default, requested_backend)?;
     let outputs = execute_with_transforms(
         &request.ledger.root_jaxpr,
         &request.ledger.transform_stack,
         &request.args,
-        backend.as_ref(),
+        backend,
+        device,
     )?;
 
     let effect_tokens = effect_ctx.finalize();
@@ -297,6 +294,7 @@ fn execute_with_transforms(
     transforms: &[Transform],
     args: &[Value],
     backend: &dyn Backend,
+    device: DeviceId,
 ) -> Result<Vec<Value>, DispatchError> {
     // Skip leading Jit transforms (no-op pass-through) to find the first
     // non-Jit transform, avoiding recursive stack frames for Jit chains.
@@ -308,14 +306,14 @@ fn execute_with_transforms(
     let remaining = &transforms[non_jit_start..];
     let Some((head, tail)) = remaining.split_first() else {
         return backend
-            .execute(root_jaxpr, args, backend.default_device())
+            .execute(root_jaxpr, args, device)
             .map_err(DispatchError::from);
     };
 
     match head {
         Transform::Jit => unreachable!("Jit transforms were skipped above"),
-        Transform::Grad => execute_grad(root_jaxpr, tail, args, backend),
-        Transform::Vmap => execute_vmap(root_jaxpr, tail, args, backend),
+        Transform::Grad => execute_grad(root_jaxpr, tail, args, backend, device),
+        Transform::Vmap => execute_vmap(root_jaxpr, tail, args, backend, device),
     }
 }
 
@@ -324,6 +322,7 @@ fn execute_grad(
     tail: &[Transform],
     args: &[Value],
     backend: &dyn Backend,
+    device: DeviceId,
 ) -> Result<Vec<Value>, DispatchError> {
     if args.is_empty() {
         return Err(TransformExecutionError::EmptyArgumentList {
@@ -339,7 +338,7 @@ fn execute_grad(
         args[0]
             .as_f64_scalar()
             .ok_or(TransformExecutionError::NonScalarGradientInput)?;
-        return execute_grad_finite_diff(root_jaxpr, tail, args, backend);
+        return execute_grad_finite_diff(root_jaxpr, tail, args, backend, device);
     }
 
     // Tensor-aware AD: grad_jaxpr returns Value gradients for all inputs
@@ -358,6 +357,7 @@ fn execute_grad_finite_diff(
     tail: &[Transform],
     args: &[Value],
     backend: &dyn Backend,
+    device: DeviceId,
 ) -> Result<Vec<Value>, DispatchError> {
     let input_value = args[0]
         .as_f64_scalar()
@@ -369,8 +369,8 @@ fn execute_grad_finite_diff(
     plus_args[0] = Value::scalar_f64(input_value + epsilon);
     minus_args[0] = Value::scalar_f64(input_value - epsilon);
 
-    let plus_out = execute_with_transforms(root_jaxpr, tail, &plus_args, backend)?;
-    let minus_out = execute_with_transforms(root_jaxpr, tail, &minus_args, backend)?;
+    let plus_out = execute_with_transforms(root_jaxpr, tail, &plus_args, backend, device)?;
+    let minus_out = execute_with_transforms(root_jaxpr, tail, &minus_args, backend, device)?;
 
     let plus_value = plus_out
         .first()
@@ -390,6 +390,7 @@ fn execute_vmap(
     tail: &[Transform],
     args: &[Value],
     backend: &dyn Backend,
+    device: DeviceId,
 ) -> Result<Vec<Value>, DispatchError> {
     if args.is_empty() {
         return Err(TransformExecutionError::EmptyArgumentList {
@@ -452,7 +453,8 @@ fn execute_vmap(
             }
         }
 
-        let mapped_output = execute_with_transforms(root_jaxpr, tail, &mapped_args, backend)?;
+        let mapped_output =
+            execute_with_transforms(root_jaxpr, tail, &mapped_args, backend, device)?;
         if index == 0 {
             per_output_values = vec![Vec::with_capacity(lead_len); mapped_output.len()];
         } else if mapped_output.len() != per_output_values.len() {
@@ -858,6 +860,44 @@ mod tests {
         assert_ne!(
             r1.cache_key, r3.cache_key,
             "different program = different key"
+        );
+    }
+
+    #[test]
+    fn dispatch_unknown_backend_falls_back_to_cpu_execution() {
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Add2, &[Transform::Jit]),
+            args: vec![Value::scalar_i64(2), Value::scalar_i64(4)],
+            backend: "quantum".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("unknown backend should fall back to cpu backend");
+
+        assert_eq!(response.outputs, vec![Value::scalar_i64(6)]);
+    }
+
+    #[test]
+    fn dispatch_backend_name_still_changes_cache_key_under_fallback() {
+        let make_request = |backend: &str| DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Add2, &[Transform::Jit]),
+            args: vec![Value::scalar_i64(2), Value::scalar_i64(4)],
+            backend: backend.to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        };
+
+        let cpu = dispatch(make_request("cpu")).expect("cpu dispatch should succeed");
+        let fallback = dispatch(make_request("quantum")).expect("fallback dispatch should succeed");
+
+        assert_eq!(cpu.outputs, fallback.outputs);
+        assert_ne!(
+            cpu.cache_key, fallback.cache_key,
+            "requested backend remains part of cache identity even when runtime execution falls back"
         );
     }
 

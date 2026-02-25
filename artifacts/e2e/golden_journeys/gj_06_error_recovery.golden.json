@@ -2,7 +2,7 @@
   "schema_version": "frankenjax.golden-journey.v1",
   "scenario_id": "gj_06_error_recovery",
   "scenario_category": "error_recovery",
-  "ts_utc_unix_ms": 1771724064427,
+  "ts_utc_unix_ms": 1772012425280,
   "replay_command": "cargo test -p fj-conformance --test golden_journeys -- golden_journey_06 --exact --nocapture",
   "input_capture": {
     "error_cases": [
@@ -36,7 +36,7 @@
     {
       "name": "wrong_arity_produces_error",
       "passed": true,
-      "detail": "error=Some(Interpreter(InputArity { expected: 2, actual: 1 }))"
+      "detail": "error=Some(BackendExecution(ExecutionFailed { detail: \"input arity mismatch: expected 2, got 1\" }))"
     }
   ],
   "output_capture": {

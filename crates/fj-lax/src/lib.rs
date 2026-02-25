@@ -15,10 +15,11 @@ use arithmetic::{
 };
 
 use comparison::eval_comparison;
-use reduction::eval_reduce_axes;
+use reduction::{eval_cumulative, eval_reduce_axes};
 use tensor_ops::{
-    eval_broadcast_in_dim, eval_concatenate, eval_dynamic_slice, eval_gather, eval_iota, eval_pad,
-    eval_reshape, eval_scatter, eval_slice, eval_transpose,
+    eval_argsort, eval_broadcast_in_dim, eval_concatenate, eval_conv, eval_dynamic_slice,
+    eval_dynamic_update_slice, eval_gather, eval_iota, eval_one_hot, eval_pad, eval_reshape,
+    eval_scatter, eval_slice, eval_sort, eval_transpose,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +238,34 @@ pub fn eval_primitive(
         Primitive::Scatter => eval_scatter(inputs, params),
         // Iota: generate index sequence
         Primitive::Iota => eval_iota(inputs, params),
+        // One-hot encoding
+        Primitive::OneHot => eval_one_hot(inputs, params),
+        // Dynamic update slice
+        Primitive::DynamicUpdateSlice => eval_dynamic_update_slice(inputs, params),
+        // Cumulative operations
+        Primitive::Cumsum => eval_cumulative(
+            primitive,
+            inputs,
+            params,
+            0_i64,
+            0.0,
+            |a, b| a + b,
+            |a, b| a + b,
+        ),
+        Primitive::Cumprod => eval_cumulative(
+            primitive,
+            inputs,
+            params,
+            1_i64,
+            1.0,
+            |a, b| a * b,
+            |a, b| a * b,
+        ),
+        // Sorting
+        Primitive::Sort => eval_sort(primitive, inputs, params),
+        Primitive::Argsort => eval_argsort(primitive, inputs, params),
+        // Convolution
+        Primitive::Conv => eval_conv(primitive, inputs, params),
     }
 }
 
@@ -2237,6 +2266,660 @@ mod tests {
             &params,
         );
         assert!(result.is_err());
+    }
+
+    // ── Higher-rank gather/scatter tests ─────────────────────────
+
+    #[test]
+    fn gather_rank3_operand() {
+        // operand: shape [3, 2, 2] — 3 matrices of 2x2
+        // indices: [2, 0]
+        // slice_sizes: 1, 2, 2
+        // result: shape [2, 2, 2] — matrices 2 and 0
+        let operand = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![3, 2, 2],
+                },
+                (1..=12).map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let indices = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape::vector(2),
+                vec![Literal::I64(2), Literal::I64(0)],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("slice_sizes".into(), "1,2,2".into());
+
+        let out = eval_primitive(Primitive::Gather, &[operand, indices], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![2, 2, 2]);
+            let vals: Vec<i64> = t
+                .elements
+                .iter()
+                .map(|l| {
+                    if let Literal::I64(n) = l {
+                        *n
+                    } else {
+                        panic!()
+                    }
+                })
+                .collect();
+            // index 2: elements 9,10,11,12; index 0: elements 1,2,3,4
+            assert_eq!(vals, vec![9, 10, 11, 12, 1, 2, 3, 4]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn scatter_into_rank3_operand() {
+        // operand: shape [3, 2, 2] all zeros
+        // indices: [1]
+        // updates: shape [1, 2, 2] = [[10, 20], [30, 40]]
+        // result: slot 1 of operand replaced with updates
+        let operand = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![3, 2, 2],
+                },
+                vec![Literal::I64(0); 12],
+            )
+            .unwrap(),
+        );
+        let indices = Value::Tensor(
+            TensorValue::new(DType::I64, Shape::vector(1), vec![Literal::I64(1)]).unwrap(),
+        );
+        let updates = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![1, 2, 2],
+                },
+                vec![
+                    Literal::I64(10),
+                    Literal::I64(20),
+                    Literal::I64(30),
+                    Literal::I64(40),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let out = eval_primitive(
+            Primitive::Scatter,
+            &[operand, indices, updates],
+            &no_params(),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![3, 2, 2]);
+            let vals: Vec<i64> = t
+                .elements
+                .iter()
+                .map(|l| {
+                    if let Literal::I64(n) = l {
+                        *n
+                    } else {
+                        panic!()
+                    }
+                })
+                .collect();
+            // Slot 0: [0,0,0,0], Slot 1: [10,20,30,40], Slot 2: [0,0,0,0]
+            assert_eq!(vals, vec![0, 0, 0, 0, 10, 20, 30, 40, 0, 0, 0, 0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    // ── Select tensor tests ────────────────────────────────────────────
+
+    #[test]
+    fn select_tensor_condition_picks_elementwise() {
+        // cond=[true,false,true], on_true=[10,20,30], on_false=[1,2,3]
+        // expected: [10,2,30]
+        let cond = Value::Tensor(
+            TensorValue::new(
+                DType::Bool,
+                Shape::vector(3),
+                vec![
+                    Literal::Bool(true),
+                    Literal::Bool(false),
+                    Literal::Bool(true),
+                ],
+            )
+            .unwrap(),
+        );
+        let on_true = Value::vector_i64(&[10, 20, 30]).unwrap();
+        let on_false = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let out =
+            eval_primitive(Primitive::Select, &[cond, on_true, on_false], &no_params()).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![3]);
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![10, 2, 30]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn select_rank2_tensor() {
+        // 2x2 tensors
+        let cond = Value::Tensor(
+            TensorValue::new(
+                DType::Bool,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::Bool(true),
+                    Literal::Bool(false),
+                    Literal::Bool(false),
+                    Literal::Bool(true),
+                ],
+            )
+            .unwrap(),
+        );
+        let on_true = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                ],
+            )
+            .unwrap(),
+        );
+        let on_false = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::I64(10),
+                    Literal::I64(20),
+                    Literal::I64(30),
+                    Literal::I64(40),
+                ],
+            )
+            .unwrap(),
+        );
+        let out =
+            eval_primitive(Primitive::Select, &[cond, on_true, on_false], &no_params()).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![2, 2]);
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![1, 20, 30, 4]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn select_tensor_shape_mismatch_errors() {
+        let cond = Value::Tensor(
+            TensorValue::new(DType::Bool, Shape::vector(3), vec![Literal::Bool(true); 3]).unwrap(),
+        );
+        let on_true = Value::vector_i64(&[1, 2]).unwrap(); // shape [2] != [3]
+        let on_false = Value::vector_i64(&[10, 20]).unwrap();
+        let result = eval_primitive(Primitive::Select, &[cond, on_true, on_false], &no_params());
+        assert!(result.is_err());
+    }
+
+    // ── OneHot tests ──────────────────────────────────────────────────
+
+    fn one_hot_params(num_classes: u32) -> BTreeMap<String, String> {
+        let mut p = BTreeMap::new();
+        p.insert("num_classes".to_owned(), num_classes.to_string());
+        p
+    }
+
+    #[test]
+    fn one_hot_vector_indices() {
+        // one_hot([0, 2, 1], num_classes=3) → [[1,0,0],[0,0,1],[0,1,0]]
+        let indices = Value::vector_i64(&[0, 2, 1]).unwrap();
+        let out = eval_primitive(Primitive::OneHot, &[indices], &one_hot_params(3)).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![3, 3]);
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn one_hot_scalar_index() {
+        // one_hot(2, num_classes=4) → [0,0,1,0]
+        let indices = Value::scalar_i64(2);
+        let out = eval_primitive(Primitive::OneHot, &[indices], &one_hot_params(4)).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![4]);
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![0.0, 0.0, 1.0, 0.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn one_hot_out_of_range_index() {
+        // Negative index → all off_value
+        let indices = Value::scalar_i64(-1);
+        let out = eval_primitive(Primitive::OneHot, &[indices], &one_hot_params(3)).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![0.0, 0.0, 0.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn one_hot_custom_on_off_values() {
+        let mut p = one_hot_params(3);
+        p.insert("on_value".to_owned(), "5.0".to_owned());
+        p.insert("off_value".to_owned(), "-1.0".to_owned());
+        let indices = Value::scalar_i64(1);
+        let out = eval_primitive(Primitive::OneHot, &[indices], &p).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![-1.0, 5.0, -1.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn one_hot_missing_num_classes_errors() {
+        let indices = Value::scalar_i64(0);
+        let result = eval_primitive(Primitive::OneHot, &[indices], &no_params());
+        assert!(result.is_err());
+    }
+
+    // ── DynamicUpdateSlice tests ──────────────────────────────────────
+
+    #[test]
+    fn dynamic_update_slice_1d() {
+        // operand: [0, 0, 0, 0, 0], update: [10, 20], start: 2
+        // result: [0, 0, 10, 20, 0]
+        let operand = Value::vector_i64(&[0, 0, 0, 0, 0]).unwrap();
+        let update = Value::vector_i64(&[10, 20]).unwrap();
+        let start = Value::scalar_i64(2);
+        let out = eval_primitive(
+            Primitive::DynamicUpdateSlice,
+            &[operand, update, start],
+            &no_params(),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![5]);
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![0, 0, 10, 20, 0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn dynamic_update_slice_2d() {
+        // operand: [[0,0,0],[0,0,0]], update: [[7,8]], start: (1,1)
+        // result: [[0,0,0],[0,7,8]]
+        let operand = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![Literal::I64(0); 6],
+            )
+            .unwrap(),
+        );
+        let update = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![1, 2] },
+                vec![Literal::I64(7), Literal::I64(8)],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(
+            Primitive::DynamicUpdateSlice,
+            &[operand, update, Value::scalar_i64(1), Value::scalar_i64(1)],
+            &no_params(),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![2, 3]);
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![0, 0, 0, 0, 7, 8]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn dynamic_update_slice_clamped_start() {
+        // Start index out of range should be clamped
+        // operand: [1, 2, 3], update: [99, 88], start: 10 → clamped to 1
+        let operand = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let update = Value::vector_i64(&[99, 88]).unwrap();
+        let start = Value::scalar_i64(10);
+        let out = eval_primitive(
+            Primitive::DynamicUpdateSlice,
+            &[operand, update, start],
+            &no_params(),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![1, 99, 88]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn dynamic_update_slice_arity_error() {
+        let operand = Value::vector_i64(&[1, 2]).unwrap();
+        let result = eval_primitive(Primitive::DynamicUpdateSlice, &[operand], &no_params());
+        assert!(result.is_err());
+    }
+
+    // ── Cumsum / Cumprod tests ────────────────────────────────────────
+
+    fn axis_params(axis: usize) -> BTreeMap<String, String> {
+        let mut p = BTreeMap::new();
+        p.insert("axis".to_owned(), axis.to_string());
+        p
+    }
+
+    #[test]
+    fn cumsum_1d() {
+        // cumsum([1, 2, 3, 4]) = [1, 3, 6, 10]
+        let input = Value::vector_i64(&[1, 2, 3, 4]).unwrap();
+        let out = eval_primitive(Primitive::Cumsum, &[input], &no_params()).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![1, 3, 6, 10]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn cumsum_2d_axis0() {
+        // [[1, 2], [3, 4]] cumsum axis=0 → [[1, 2], [4, 6]]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Cumsum, &[input], &axis_params(0)).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![1, 2, 4, 6]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn cumsum_2d_axis1() {
+        // [[1, 2], [3, 4]] cumsum axis=1 → [[1, 3], [3, 7]]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Cumsum, &[input], &axis_params(1)).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![1, 3, 3, 7]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn cumprod_1d() {
+        // cumprod([1, 2, 3, 4]) = [1, 2, 6, 24]
+        let input = Value::vector_i64(&[1, 2, 3, 4]).unwrap();
+        let out = eval_primitive(Primitive::Cumprod, &[input], &no_params()).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![1, 2, 6, 24]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn cumprod_f64() {
+        // cumprod([1.0, 2.0, 3.0]) = [1.0, 2.0, 6.0]
+        let input = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let out = eval_primitive(Primitive::Cumprod, &[input], &no_params()).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![1.0, 2.0, 6.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    // ── Sort / Argsort tests ──────────────────────────────────────────
+
+    #[test]
+    fn sort_1d_ascending() {
+        let input = Value::vector_i64(&[3, 1, 4, 1, 5]).unwrap();
+        let out = eval_primitive(Primitive::Sort, &[input], &no_params()).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![1, 1, 3, 4, 5]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn sort_1d_descending() {
+        let mut p = BTreeMap::new();
+        p.insert("descending".to_owned(), "true".to_owned());
+        let input = Value::vector_i64(&[3, 1, 4, 1, 5]).unwrap();
+        let out = eval_primitive(Primitive::Sort, &[input], &p).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![5, 4, 3, 1, 1]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn argsort_1d() {
+        let input = Value::vector_i64(&[30, 10, 20]).unwrap();
+        let out = eval_primitive(Primitive::Argsort, &[input], &no_params()).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![1, 2, 0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn sort_2d_axis1() {
+        // [[3, 1], [4, 2]] sorted along axis 1 → [[1, 3], [2, 4]]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::I64(3),
+                    Literal::I64(1),
+                    Literal::I64(4),
+                    Literal::I64(2),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Sort, &[input], &axis_params(1)).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+            assert_eq!(vals, vec![1, 3, 2, 4]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    // ── Conv tests ────────────────────────────────────────────────────
+
+    fn conv_params(padding: &str, strides: &str) -> BTreeMap<String, String> {
+        let mut p = BTreeMap::new();
+        p.insert("padding".to_owned(), padding.to_owned());
+        p.insert("strides".to_owned(), strides.to_owned());
+        p
+    }
+
+    #[test]
+    fn conv_1d_valid_single_channel() {
+        // lhs=[1, 4, 1] (batch=1, width=4, channels=1)
+        // rhs=[2, 1, 1] (kernel=2, c_in=1, c_out=1)
+        // valid padding, stride=1 → output=[1, 3, 1]
+        // input: [1, 2, 3, 4], kernel: [1, 1]
+        // out: [1*1+2*1, 2*1+3*1, 3*1+4*1] = [3, 5, 7]
+        let lhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 4, 1],
+                },
+                vec![1.0, 2.0, 3.0, 4.0]
+                    .into_iter()
+                    .map(Literal::from_f64)
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![2, 1, 1],
+                },
+                vec![1.0, 1.0].into_iter().map(Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("valid", "1")).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![1, 3, 1]);
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![3.0, 5.0, 7.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn conv_1d_same_padding() {
+        // lhs=[1, 3, 1], rhs=[3, 1, 1], same padding, stride=1
+        // input: [1, 2, 3], kernel: [1, 1, 1]
+        // same → output width=3
+        // pad_left=1: padded=[0, 1, 2, 3, 0]
+        // out: [0+1+2, 1+2+3, 2+3+0] = [3, 6, 5]
+        let lhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 3, 1],
+                },
+                vec![1.0, 2.0, 3.0]
+                    .into_iter()
+                    .map(Literal::from_f64)
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![3, 1, 1],
+                },
+                vec![1.0, 1.0, 1.0]
+                    .into_iter()
+                    .map(Literal::from_f64)
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("same", "1")).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![1, 3, 1]);
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![3.0, 6.0, 5.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn conv_1d_stride2() {
+        // lhs=[1, 6, 1], rhs=[2, 1, 1], valid, stride=2
+        // input: [1,2,3,4,5,6], kernel: [1,1]
+        // output width = (6-2)/2+1 = 3
+        // positions: 0,2,4 → [1+2, 3+4, 5+6] = [3, 7, 11]
+        let lhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![1, 6, 1],
+                },
+                (1..=6).map(|i| Literal::from_f64(i as f64)).collect(),
+            )
+            .unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![2, 1, 1],
+                },
+                vec![Literal::from_f64(1.0), Literal::from_f64(1.0)],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("valid", "2")).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![1, 3, 1]);
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![3.0, 7.0, 11.0]);
+        } else {
+            panic!("expected tensor");
+        }
     }
 }
 

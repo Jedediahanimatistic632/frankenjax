@@ -1159,6 +1159,124 @@ pub(crate) fn eval_dynamic_slice(
     )?))
 }
 
+/// DynamicUpdateSlice: write `update` into `operand` at position given by start indices.
+///
+/// Inputs: [operand, update, start_0, start_1, ..., start_{rank-1}]
+/// Output: tensor with same shape as operand, with the update region overwritten.
+pub(crate) fn eval_dynamic_update_slice(
+    inputs: &[Value],
+    _params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    let primitive = Primitive::DynamicUpdateSlice;
+    if inputs.len() < 2 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 3,
+            actual: inputs.len(),
+        });
+    }
+
+    let operand = match &inputs[0] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "cannot dynamic_update_slice a scalar".into(),
+            });
+        }
+    };
+
+    let update = match &inputs[1] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "update must be a tensor".into(),
+            });
+        }
+    };
+
+    let rank = operand.shape.rank();
+    if update.shape.rank() != rank {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "update rank {} != operand rank {}",
+                update.shape.rank(),
+                rank
+            ),
+        });
+    }
+
+    if inputs.len() != 2 + rank {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 2 + rank,
+            actual: inputs.len(),
+        });
+    }
+
+    // Parse start indices (one scalar per axis), clamped to valid range
+    let mut starts = Vec::with_capacity(rank);
+    for ax in 0..rank {
+        let start_val = match &inputs[2 + ax] {
+            Value::Scalar(lit) => {
+                let raw = match lit {
+                    Literal::I64(v) => *v,
+                    Literal::F64Bits(b) => f64::from_bits(*b) as i64,
+                    Literal::Bool(b) => i64::from(*b),
+                };
+                let dim = operand.shape.dims[ax] as i64;
+                let upd_size = update.shape.dims[ax] as i64;
+                raw.max(0).min(dim - upd_size) as usize
+            }
+            Value::Tensor(_) => {
+                return Err(EvalError::Unsupported {
+                    primitive,
+                    detail: format!("start index for axis {ax} must be a scalar"),
+                });
+            }
+        };
+        starts.push(start_val);
+    }
+
+    // Copy operand elements, overwriting the update region
+    let mut elements = operand.elements.clone();
+
+    let mut op_strides = vec![1_usize; rank];
+    for i in (0..rank.saturating_sub(1)).rev() {
+        op_strides[i] = op_strides[i + 1] * operand.shape.dims[i + 1] as usize;
+    }
+
+    let upd_total = update.elements.len();
+    let mut upd_coords = vec![0_usize; rank];
+
+    for upd_flat in 0..upd_total {
+        let mut op_flat = 0_usize;
+        for ax in 0..rank {
+            op_flat += (upd_coords[ax] + starts[ax]) * op_strides[ax];
+        }
+        if op_flat < elements.len() {
+            elements[op_flat] = update.elements[upd_flat];
+        }
+
+        // Increment update coordinates
+        for ax in (0..rank).rev() {
+            upd_coords[ax] += 1;
+            if upd_coords[ax] < update.shape.dims[ax] as usize {
+                break;
+            }
+            upd_coords[ax] = 0;
+        }
+    }
+
+    Ok(Value::Tensor(TensorValue::new(
+        operand.dtype,
+        operand.shape.clone(),
+        elements,
+    )?))
+}
+
 /// Iota: generate a 1-D index tensor of length `length` with dtype `dtype`.
 ///
 /// Inputs: [] (no inputs — iota is a nullary operation)
@@ -1221,6 +1339,412 @@ pub(crate) fn eval_iota(
     Ok(Value::Tensor(TensorValue::new(
         dtype,
         Shape::vector(length),
+        elements,
+    )?))
+}
+
+/// One-hot encoding: given integer indices, produces a tensor with a trailing
+/// `num_classes` dimension where position `index` is `on_value` and the rest
+/// are `off_value`.
+pub(crate) fn eval_one_hot(
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    let primitive = Primitive::OneHot;
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+
+    let num_classes_str = params
+        .get("num_classes")
+        .ok_or_else(|| EvalError::Unsupported {
+            primitive,
+            detail: "missing required param 'num_classes'".into(),
+        })?;
+    let num_classes: u32 = num_classes_str
+        .trim()
+        .parse()
+        .map_err(|_| EvalError::Unsupported {
+            primitive,
+            detail: format!("invalid num_classes: '{num_classes_str}'"),
+        })?;
+
+    let on_value: f64 = params
+        .get("on_value")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1.0);
+    let off_value: f64 = params
+        .get("off_value")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0.0);
+
+    let dtype_str = params.get("dtype").map(String::as_str).unwrap_or("F64");
+
+    // Collect flat index values from input
+    let indices: Vec<i64> = match &inputs[0] {
+        Value::Scalar(lit) => {
+            vec![lit.as_i64().ok_or(EvalError::TypeMismatch {
+                primitive,
+                detail: "one_hot requires integer indices",
+            })?]
+        }
+        Value::Tensor(t) => {
+            let mut idxs = Vec::with_capacity(t.elements.len());
+            for lit in &t.elements {
+                idxs.push(lit.as_i64().ok_or(EvalError::TypeMismatch {
+                    primitive,
+                    detail: "one_hot requires integer indices",
+                })?);
+            }
+            idxs
+        }
+    };
+
+    // Build output shape: input_shape ++ [num_classes]
+    let input_shape = match &inputs[0] {
+        Value::Scalar(_) => vec![],
+        Value::Tensor(t) => t.shape.dims.clone(),
+    };
+    let mut out_dims = input_shape;
+    out_dims.push(num_classes);
+
+    let nc = num_classes as usize;
+    let total = indices.len() * nc;
+    let mut elements = Vec::with_capacity(total);
+
+    let use_int = matches!(dtype_str, "I64" | "i64" | "I32" | "i32");
+
+    for &idx in &indices {
+        for c in 0..nc {
+            let val = if idx >= 0 && (idx as usize) == c {
+                on_value
+            } else {
+                off_value
+            };
+            if use_int {
+                elements.push(Literal::I64(val as i64));
+            } else {
+                elements.push(Literal::from_f64(val));
+            }
+        }
+    }
+
+    let dtype = match dtype_str {
+        "I64" | "i64" => DType::I64,
+        "I32" | "i32" => DType::I32,
+        "F32" | "f32" => DType::F32,
+        _ => DType::F64,
+    };
+
+    Ok(Value::Tensor(TensorValue::new(
+        dtype,
+        Shape { dims: out_dims },
+        elements,
+    )?))
+}
+
+/// Sort: sort elements along a specified axis (default: last axis).
+pub(crate) fn eval_sort(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+
+    let descending = params
+        .get("descending")
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false);
+
+    match &inputs[0] {
+        Value::Scalar(_) => Ok(inputs[0].clone()),
+        Value::Tensor(tensor) => {
+            let rank = tensor.shape.rank();
+            if rank == 0 {
+                return Ok(Value::Scalar(tensor.elements[0]));
+            }
+
+            let axis: usize = params
+                .get("axis")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(rank - 1);
+
+            if axis >= rank {
+                return Err(EvalError::Unsupported {
+                    primitive,
+                    detail: format!("axis {} out of bounds for rank {}", axis, rank),
+                });
+            }
+
+            sort_along_axis(tensor, axis, descending, false).map_err(|e| EvalError::Unsupported {
+                primitive,
+                detail: e,
+            })
+        }
+    }
+}
+
+/// Argsort: return indices that would sort along a specified axis.
+pub(crate) fn eval_argsort(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+
+    let descending = params
+        .get("descending")
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false);
+
+    match &inputs[0] {
+        Value::Scalar(_) => Ok(Value::scalar_i64(0)),
+        Value::Tensor(tensor) => {
+            let rank = tensor.shape.rank();
+            if rank == 0 {
+                return Ok(Value::scalar_i64(0));
+            }
+
+            let axis: usize = params
+                .get("axis")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(rank - 1);
+
+            if axis >= rank {
+                return Err(EvalError::Unsupported {
+                    primitive,
+                    detail: format!("axis {} out of bounds for rank {}", axis, rank),
+                });
+            }
+
+            sort_along_axis(tensor, axis, descending, true).map_err(|e| EvalError::Unsupported {
+                primitive,
+                detail: e,
+            })
+        }
+    }
+}
+
+/// Sort or argsort a tensor along a given axis.
+fn sort_along_axis(
+    tensor: &TensorValue,
+    axis: usize,
+    descending: bool,
+    return_indices: bool,
+) -> Result<Value, String> {
+    let rank = tensor.shape.rank();
+    let axis_dim = tensor.shape.dims[axis] as usize;
+
+    let mut strides = vec![1_usize; rank];
+    for i in (0..rank.saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * tensor.shape.dims[i + 1] as usize;
+    }
+    let axis_stride = strides[axis];
+    let total = tensor.elements.len();
+    let outer_count = total / axis_dim;
+
+    let is_integral = tensor.dtype == DType::I64 || tensor.dtype == DType::I32;
+    let mut result_elements = if return_indices {
+        vec![Literal::I64(0); total]
+    } else {
+        tensor.elements.clone()
+    };
+
+    for outer in 0..outer_count {
+        let base = {
+            let mut idx = outer;
+            let mut flat = 0_usize;
+            for ax in (0..rank).rev() {
+                if ax == axis {
+                    continue;
+                }
+                let dim = tensor.shape.dims[ax] as usize;
+                flat += (idx % dim) * strides[ax];
+                idx /= dim;
+            }
+            flat
+        };
+
+        let mut indexed: Vec<(usize, f64)> = (0..axis_dim)
+            .map(|i| {
+                let flat_idx = base + i * axis_stride;
+                let val = if is_integral {
+                    tensor.elements[flat_idx]
+                        .as_i64()
+                        .map(|v| v as f64)
+                        .unwrap_or(0.0)
+                } else {
+                    tensor.elements[flat_idx].as_f64().unwrap_or(0.0)
+                };
+                (i, val)
+            })
+            .collect();
+
+        if descending {
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        for (out_pos, &(orig_idx, val)) in indexed.iter().enumerate() {
+            let flat_idx = base + out_pos * axis_stride;
+            if return_indices {
+                result_elements[flat_idx] = Literal::I64(orig_idx as i64);
+            } else if is_integral {
+                result_elements[flat_idx] = Literal::I64(val as i64);
+            } else {
+                result_elements[flat_idx] = Literal::from_f64(val);
+            }
+        }
+    }
+
+    let out_dtype = if return_indices {
+        DType::I64
+    } else {
+        tensor.dtype
+    };
+    Ok(Value::Tensor(
+        TensorValue::new(out_dtype, tensor.shape.clone(), result_elements)
+            .map_err(|e| e.to_string())?,
+    ))
+}
+
+/// Conv: N-dimensional convolution.
+/// Layout: lhs=[batch, spatial..., in_channels], rhs=[kernel_spatial..., in_channels, out_channels]
+/// Params: strides (comma-sep), padding ("valid" or "same")
+pub(crate) fn eval_conv(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 2 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 2,
+            actual: inputs.len(),
+        });
+    }
+
+    let lhs = match &inputs[0] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "conv requires tensor inputs".into(),
+            });
+        }
+    };
+    let rhs = match &inputs[1] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "conv requires tensor kernel".into(),
+            });
+        }
+    };
+
+    let lhs_rank = lhs.shape.rank();
+    if lhs_rank < 3 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("conv lhs must have rank >= 3, got {lhs_rank}"),
+        });
+    }
+
+    // Only 1D conv for now: lhs=[N, W, C_in], rhs=[K, C_in, C_out]
+    if lhs_rank != 3 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("only 1D conv supported (rank 3), got rank {lhs_rank}"),
+        });
+    }
+
+    let batch = lhs.shape.dims[0] as usize;
+    let width = lhs.shape.dims[1] as usize;
+    let c_in = lhs.shape.dims[2] as usize;
+
+    let kernel_w = rhs.shape.dims[0] as usize;
+    let rhs_c_in = rhs.shape.dims[1] as usize;
+    let c_out = rhs.shape.dims[2] as usize;
+
+    if c_in != rhs_c_in {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("channel mismatch: lhs c_in={c_in}, rhs c_in={rhs_c_in}"),
+        });
+    }
+
+    let stride: usize = params
+        .get("strides")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1);
+
+    let padding_mode = params.get("padding").map(String::as_str).unwrap_or("valid");
+
+    let (out_w, pad_left) = match padding_mode {
+        "same" | "SAME" => {
+            let out_w = (width + stride - 1) / stride;
+            let pad_total = ((out_w - 1) * stride + kernel_w).saturating_sub(width);
+            (out_w, pad_total / 2)
+        }
+        _ => {
+            // "valid"
+            if width < kernel_w {
+                return Err(EvalError::Unsupported {
+                    primitive,
+                    detail: format!("input width {width} < kernel {kernel_w} with valid padding"),
+                });
+            }
+            ((width - kernel_w) / stride + 1, 0)
+        }
+    };
+
+    let total = batch * out_w * c_out;
+    let mut elements = Vec::with_capacity(total);
+
+    for n in 0..batch {
+        for w in 0..out_w {
+            for co in 0..c_out {
+                let mut acc = 0.0_f64;
+                for k in 0..kernel_w {
+                    let in_pos = (w * stride + k) as isize - pad_left as isize;
+                    if in_pos >= 0 && (in_pos as usize) < width {
+                        for ci in 0..c_in {
+                            let lhs_idx = n * width * c_in + (in_pos as usize) * c_in + ci;
+                            let rhs_idx = k * c_in * c_out + ci * c_out + co;
+                            let lhs_val = lhs.elements[lhs_idx].as_f64().unwrap_or(0.0);
+                            let rhs_val = rhs.elements[rhs_idx].as_f64().unwrap_or(0.0);
+                            acc += lhs_val * rhs_val;
+                        }
+                    }
+                }
+                elements.push(Literal::from_f64(acc));
+            }
+        }
+    }
+
+    Ok(Value::Tensor(TensorValue::new(
+        DType::F64,
+        Shape {
+            dims: vec![batch as u32, out_w as u32, c_out as u32],
+        },
         elements,
     )?))
 }

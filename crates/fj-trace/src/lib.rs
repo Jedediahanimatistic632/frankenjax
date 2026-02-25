@@ -513,6 +513,19 @@ impl SimpleTraceContext {
                     shape: Shape { dims: slice_sizes },
                 }])
             }
+            Primitive::DynamicUpdateSlice => {
+                // dynamic_update_slice(operand, update, ...starts): output = operand shape
+                if inputs.len() < 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected at least 2 inputs, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![ShapedArray {
+                    dtype: inputs[0].dtype,
+                    shape: inputs[0].shape.clone(),
+                }])
+            }
             Primitive::Clamp => {
                 // clamp(x, lo, hi): 3 inputs, output shape matches first
                 if inputs.len() != 3 {
@@ -537,6 +550,110 @@ impl SimpleTraceContext {
                 Ok(vec![ShapedArray {
                     dtype,
                     shape: Shape::vector(length),
+                }])
+            }
+            Primitive::OneHot => {
+                // one_hot(indices): output appends num_classes dimension
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                let num_classes = params
+                    .get("num_classes")
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .ok_or_else(|| TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "missing or invalid 'num_classes' param".to_owned(),
+                    })?;
+                let dtype_str = params.get("dtype").map(String::as_str).unwrap_or("F64");
+                let dtype = match dtype_str {
+                    "I64" | "i64" => DType::I64,
+                    "I32" | "i32" => DType::I32,
+                    _ => DType::F64,
+                };
+                let mut out_dims = inputs[0].shape.dims.clone();
+                out_dims.push(num_classes);
+                Ok(vec![ShapedArray {
+                    dtype,
+                    shape: Shape { dims: out_dims },
+                }])
+            }
+            Primitive::Cumsum | Primitive::Cumprod | Primitive::Sort => {
+                // Cumulative/sort ops: output shape = input shape
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![inputs[0].clone()])
+            }
+            Primitive::Argsort => {
+                // Argsort: output shape = input shape, dtype = I64
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: inputs[0].shape.clone(),
+                }])
+            }
+            Primitive::Conv => {
+                // Conv: output shape depends on input, kernel, strides, padding.
+                // For now: 1D conv with [batch, spatial, channels] layout.
+                if inputs.len() != 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 2 inputs (lhs, rhs), got {}", inputs.len()),
+                    });
+                }
+                let lhs = &inputs[0];
+                let rhs = &inputs[1];
+                // Simple 1D: lhs=[N, W, C_in], rhs=[K, C_in, C_out]
+                // output=[N, W_out, C_out] where W_out depends on stride/padding
+                let lhs_rank = lhs.shape.rank();
+                if lhs_rank < 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "lhs must have rank >= 2".to_owned(),
+                    });
+                }
+                let strides: Vec<usize> = params
+                    .get("strides")
+                    .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+                    .unwrap_or_else(|| vec![1; lhs_rank - 2]);
+                let padding_mode = params.get("padding").map(String::as_str).unwrap_or("valid");
+
+                let mut out_dims = Vec::new();
+                out_dims.push(lhs.shape.dims[0]); // batch
+                for i in 0..(lhs_rank - 2) {
+                    let spatial = lhs.shape.dims[i + 1] as usize;
+                    let kernel = rhs.shape.dims[i] as usize;
+                    let stride = *strides.get(i).unwrap_or(&1);
+                    let out_spatial = match padding_mode {
+                        "same" | "SAME" => (spatial + stride - 1) / stride,
+                        _ => {
+                            // "valid" / default
+                            if spatial >= kernel {
+                                (spatial - kernel) / stride + 1
+                            } else {
+                                0
+                            }
+                        }
+                    };
+                    out_dims.push(out_spatial as u32);
+                }
+                // Last dim of rhs is output channels
+                out_dims.push(*rhs.shape.dims.last().unwrap_or(&1));
+                let dtype = promote_dtype(lhs.dtype, rhs.dtype);
+                Ok(vec![ShapedArray {
+                    dtype,
+                    shape: Shape { dims: out_dims },
                 }])
             }
         }
@@ -2250,6 +2367,34 @@ mod tests {
                     fj_test_utils::TestResult::Pass,
                 );
                 assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn infer_one_hot_appends_num_classes_dim() {
+        run_logged_test(
+            "infer_one_hot_appends_num_classes_dim",
+            fj_test_utils::fixture_id_from_json(&("one-hot-shape", [4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape::vector(4),
+                }]);
+                let idx = TracerId(1);
+
+                let mut params = BTreeMap::new();
+                params.insert("num_classes".to_owned(), "5".to_owned());
+
+                let out = ctx
+                    .process_primitive(Primitive::OneHot, &[idx], params)
+                    .expect("one_hot inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.shape, Shape { dims: vec![4, 5] });
+                assert_eq!(aval.dtype, DType::F64);
                 Ok(Vec::new())
             },
         );

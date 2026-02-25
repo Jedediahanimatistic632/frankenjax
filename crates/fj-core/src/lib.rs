@@ -120,6 +120,7 @@ pub enum Primitive {
     Reshape,
     Slice,
     DynamicSlice,
+    DynamicUpdateSlice,
     Gather,
     Scatter,
     Transpose,
@@ -130,6 +131,16 @@ pub enum Primitive {
     Clamp,
     // Index generation
     Iota,
+    // Encoding
+    OneHot,
+    // Cumulative
+    Cumsum,
+    Cumprod,
+    // Sorting
+    Sort,
+    Argsort,
+    // Convolution
+    Conv,
 }
 
 impl Primitive {
@@ -186,6 +197,7 @@ impl Primitive {
             Self::Reshape => "reshape",
             Self::Slice => "slice",
             Self::DynamicSlice => "dynamic_slice",
+            Self::DynamicUpdateSlice => "dynamic_update_slice",
             Self::Gather => "gather",
             Self::Scatter => "scatter",
             Self::Transpose => "transpose",
@@ -194,6 +206,12 @@ impl Primitive {
             Self::Pad => "pad",
             Self::Clamp => "clamp",
             Self::Iota => "iota",
+            Self::OneHot => "one_hot",
+            Self::Cumsum => "cumsum",
+            Self::Cumprod => "cumprod",
+            Self::Sort => "sort",
+            Self::Argsort => "argsort",
+            Self::Conv => "conv",
         }
     }
 }

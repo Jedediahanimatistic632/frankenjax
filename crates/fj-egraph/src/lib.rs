@@ -294,7 +294,14 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             | Primitive::BroadcastInDim
             | Primitive::Concatenate
             | Primitive::Pad
-            | Primitive::Iota => {
+            | Primitive::Iota
+            | Primitive::OneHot
+            | Primitive::DynamicUpdateSlice
+            | Primitive::Cumsum
+            | Primitive::Cumprod
+            | Primitive::Sort
+            | Primitive::Argsort
+            | Primitive::Conv => {
                 panic!(
                     "primitive {} not supported by egraph lowering",
                     eqn.primitive.as_str()

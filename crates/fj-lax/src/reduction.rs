@@ -224,3 +224,107 @@ fn multi_to_out_flat(multi: &[usize], kept_axes: &[usize], out_dims: &[u32]) -> 
     }
     idx
 }
+
+/// Cumulative scan along a specified axis. Output shape matches input.
+/// If no axis param, defaults to axis 0.
+pub(crate) fn eval_cumulative(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &std::collections::BTreeMap<String, String>,
+    int_init: i64,
+    float_init: f64,
+    int_op: impl Fn(i64, i64) -> i64,
+    float_op: impl Fn(f64, f64) -> f64,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+
+    match &inputs[0] {
+        Value::Scalar(literal) => Ok(Value::Scalar(*literal)),
+        Value::Tensor(tensor) => {
+            let rank = tensor.shape.rank();
+            if rank == 0 {
+                return Ok(Value::Scalar(tensor.elements[0]));
+            }
+
+            let axis: usize = params
+                .get("axis")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+
+            if axis >= rank {
+                return Err(EvalError::Unsupported {
+                    primitive,
+                    detail: format!("axis {} out of bounds for rank {}", axis, rank),
+                });
+            }
+
+            let is_integral = tensor.dtype == DType::I64 || tensor.dtype == DType::I32;
+
+            // Compute strides
+            let strides = compute_strides(&tensor.shape.dims);
+            let axis_dim = tensor.shape.dims[axis] as usize;
+            let axis_stride = strides[axis];
+
+            let total = tensor.elements.len();
+            let mut elements = tensor.elements.clone();
+
+            // For each "line" along the axis, do a prefix scan
+            // A line is identified by all indices except the axis index
+            let outer_count = total / axis_dim;
+
+            for outer in 0..outer_count {
+                // Compute the flat index of the first element of this line (axis index = 0)
+                // outer is the index in the "all-but-axis" space
+                let base = {
+                    let mut idx = outer;
+                    let mut flat = 0_usize;
+                    for ax in (0..rank).rev() {
+                        if ax == axis {
+                            continue;
+                        }
+                        let dim = tensor.shape.dims[ax] as usize;
+                        flat += (idx % dim) * strides[ax];
+                        idx /= dim;
+                    }
+                    flat
+                };
+
+                if is_integral {
+                    let mut acc = int_init;
+                    for i in 0..axis_dim {
+                        let flat_idx = base + i * axis_stride;
+                        let val = elements[flat_idx].as_i64().ok_or(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "expected i64 tensor",
+                        })?;
+                        acc = int_op(acc, val);
+                        elements[flat_idx] = Literal::I64(acc);
+                    }
+                } else {
+                    let mut acc = float_init;
+                    for i in 0..axis_dim {
+                        let flat_idx = base + i * axis_stride;
+                        let val = elements[flat_idx].as_f64().ok_or(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "expected numeric tensor",
+                        })?;
+                        acc = float_op(acc, val);
+                        elements[flat_idx] = Literal::from_f64(acc);
+                    }
+                }
+            }
+
+            Ok(Value::Tensor(TensorValue::new(
+                tensor.dtype,
+                tensor.shape.clone(),
+                elements,
+            )?))
+        }
+    }
+}

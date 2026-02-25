@@ -125,6 +125,7 @@ pub enum Primitive {
     Transpose,
     BroadcastInDim,
     Concatenate,
+    Pad,
     // Clamping
     Clamp,
     // Index generation
@@ -190,6 +191,7 @@ impl Primitive {
             Self::Transpose => "transpose",
             Self::BroadcastInDim => "broadcast_in_dim",
             Self::Concatenate => "concatenate",
+            Self::Pad => "pad",
             Self::Clamp => "clamp",
             Self::Iota => "iota",
         }
@@ -1261,9 +1263,20 @@ mod tests {
             params: concat_params,
         });
 
+        let mut pad_params = BTreeMap::new();
+        pad_params.insert("padding_low".to_owned(), "1,0".to_owned());
+        pad_params.insert("padding_high".to_owned(), "0,1".to_owned());
+        pad_params.insert("padding_interior".to_owned(), "0,1".to_owned());
+        equations.push(Equation {
+            primitive: Primitive::Pad,
+            inputs: smallvec![Atom::Var(VarId(10)), Atom::Var(VarId(4))],
+            outputs: smallvec![VarId(18)],
+            params: pad_params,
+        });
+
         equations.push(Equation {
             primitive: Primitive::Scatter,
-            inputs: smallvec![Atom::Var(VarId(10)), Atom::Var(VarId(2))],
+            inputs: smallvec![Atom::Var(VarId(18)), Atom::Var(VarId(2))],
             outputs: smallvec![VarId(11)],
             params: BTreeMap::new(),
         });
@@ -1352,6 +1365,7 @@ mod tests {
                     Primitive::Transpose,
                     Primitive::BroadcastInDim,
                     Primitive::Concatenate,
+                    Primitive::Pad,
                 ]
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>();
@@ -1831,11 +1845,12 @@ mod tests {
                     Primitive::Transpose,
                     Primitive::BroadcastInDim,
                     Primitive::Concatenate,
+                    Primitive::Pad,
                 ]
                 .into_iter()
                 .map(Primitive::as_str)
                 .collect::<Vec<_>>();
-                assert_eq!(primitive_names.len(), 13);
+                assert_eq!(primitive_names.len(), 14);
 
                 let scalar_i64 = Value::scalar_i64(7);
                 let scalar_bool = Value::scalar_bool(true);

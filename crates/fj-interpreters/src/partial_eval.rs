@@ -571,6 +571,48 @@ fn infer_equation_output_aval(eqn: &Equation, first_input: &AbstractValue) -> Ab
             // The dtype is correct; the shape is best-effort from first input.
             first_input.clone()
         }
+        // Pad: expand each axis by low/high edges and interior spacing.
+        Pad => {
+            let parse_list = |key: &str| {
+                eqn.params.get(key).map(|s| {
+                    s.split(',')
+                        .filter_map(|d| d.trim().parse::<u32>().ok())
+                        .collect::<Vec<_>>()
+                })
+            };
+
+            let rank = first_input.shape.rank();
+            let shape = match (
+                parse_list("padding_low"),
+                parse_list("padding_high"),
+                parse_list("padding_interior"),
+            ) {
+                (Some(lows), Some(highs), Some(interiors))
+                    if lows.len() == rank && highs.len() == rank && interiors.len() == rank =>
+                {
+                    let dims = first_input
+                        .shape
+                        .dims
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &dim)| {
+                            let interior_span = dim.saturating_sub(1).saturating_mul(interiors[i]);
+                            lows[i]
+                                .saturating_add(dim)
+                                .saturating_add(interior_span)
+                                .saturating_add(highs[i])
+                        })
+                        .collect();
+                    Shape { dims }
+                }
+                _ => first_input.shape.clone(),
+            };
+
+            AbstractValue {
+                dtype: first_input.dtype,
+                shape,
+            }
+        }
         // DynamicSlice: output shape = slice_sizes param
         DynamicSlice => {
             let shape = eqn

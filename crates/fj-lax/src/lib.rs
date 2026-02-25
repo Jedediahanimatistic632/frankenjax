@@ -18,7 +18,7 @@ use comparison::eval_comparison;
 use reduction::eval_reduce_axes;
 use tensor_ops::{
     eval_broadcast_in_dim, eval_concatenate, eval_dynamic_slice, eval_gather, eval_iota,
-    eval_reshape, eval_scatter, eval_slice, eval_transpose,
+    eval_pad, eval_reshape, eval_scatter, eval_slice, eval_transpose,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +230,7 @@ pub fn eval_primitive(
         Primitive::Transpose => eval_transpose(inputs, params),
         Primitive::BroadcastInDim => eval_broadcast_in_dim(inputs, params),
         Primitive::Concatenate => eval_concatenate(inputs, params),
+        Primitive::Pad => eval_pad(inputs, params),
         Primitive::Slice => eval_slice(inputs, params),
         Primitive::DynamicSlice => eval_dynamic_slice(inputs, params),
         Primitive::Gather => eval_gather(inputs, params),
@@ -247,6 +248,14 @@ mod tests {
 
     fn no_params() -> BTreeMap<String, String> {
         BTreeMap::new()
+    }
+
+    fn pad_params(low: &str, high: &str, interior: &str) -> BTreeMap<String, String> {
+        let mut params = BTreeMap::new();
+        params.insert("padding_low".to_owned(), low.to_owned());
+        params.insert("padding_high".to_owned(), high.to_owned());
+        params.insert("padding_interior".to_owned(), interior.to_owned());
+        params
     }
 
     #[test]
@@ -645,6 +654,74 @@ mod tests {
         let out = eval_primitive(Primitive::Concatenate, &[a, b], &no_params()).unwrap();
         let expected = Value::vector_i64(&[1, 2, 3, 4, 5]).unwrap();
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn pad_vector_with_edge_padding() {
+        let input = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let params = pad_params("1", "2", "0");
+        let out = eval_primitive(Primitive::Pad, &[input, Value::scalar_i64(0)], &params).unwrap();
+        let expected = Value::vector_i64(&[0, 1, 2, 3, 0, 0]).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn pad_vector_with_interior_and_edge_padding() {
+        let input = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let params = pad_params("1", "1", "1");
+        let out = eval_primitive(Primitive::Pad, &[input, Value::scalar_i64(0)], &params).unwrap();
+        let expected = Value::vector_i64(&[0, 1, 0, 2, 0, 3, 0]).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn pad_rank2_tensor_preserves_layout() {
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                ],
+            )
+            .unwrap(),
+        );
+        let params = pad_params("1,0", "0,1", "0,1");
+        let out = eval_primitive(Primitive::Pad, &[input, Value::scalar_i64(0)], &params).unwrap();
+        let out_tensor = out.as_tensor().expect("pad output should be tensor");
+        assert_eq!(out_tensor.shape.dims, vec![3, 5]);
+        assert_eq!(
+            out_tensor.elements,
+            vec![
+                Literal::I64(0),
+                Literal::I64(0),
+                Literal::I64(0),
+                Literal::I64(0),
+                Literal::I64(0),
+                Literal::I64(1),
+                Literal::I64(0),
+                Literal::I64(2),
+                Literal::I64(0),
+                Literal::I64(0),
+                Literal::I64(3),
+                Literal::I64(0),
+                Literal::I64(4),
+                Literal::I64(0),
+                Literal::I64(0),
+            ]
+        );
+    }
+
+    #[test]
+    fn pad_rejects_negative_padding_values() {
+        let input = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let params = pad_params("-1", "0", "0");
+        let err =
+            eval_primitive(Primitive::Pad, &[input, Value::scalar_i64(0)], &params).unwrap_err();
+        assert!(matches!(err, EvalError::Unsupported { .. }));
     }
 
     #[test]

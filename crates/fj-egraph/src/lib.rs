@@ -293,6 +293,7 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             | Primitive::Transpose
             | Primitive::BroadcastInDim
             | Primitive::Concatenate
+            | Primitive::Pad
             | Primitive::Iota => {
                 panic!(
                     "primitive {} not supported by egraph lowering",
@@ -989,6 +990,7 @@ fn is_egraph_supported_primitive(primitive: Primitive) -> bool {
             | Primitive::Transpose
             | Primitive::BroadcastInDim
             | Primitive::Concatenate
+            | Primitive::Pad
             | Primitive::Iota
     )
 }

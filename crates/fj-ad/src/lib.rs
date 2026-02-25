@@ -1111,6 +1111,7 @@ fn vjp(
             }
             Ok(grads)
         }
+        Primitive::Pad => Err(AdError::UnsupportedPrimitive(Primitive::Pad)),
         Primitive::Iota => {
             // Iota has no inputs, so no gradients to propagate.
             Ok(vec![])
@@ -1516,6 +1517,8 @@ fn jvp_rule(primitive: Primitive, primals: &[Value], tangents: &[f64]) -> Result
         }
         // DynamicSlice: tangent passes through to operand
         Primitive::DynamicSlice => Ok(tangents[0]),
+        // Pad JVP is not implemented yet.
+        Primitive::Pad => Err(AdError::UnsupportedPrimitive(Primitive::Pad)),
         // Iota: no inputs, no tangent
         Primitive::Iota => Ok(0.0),
     }

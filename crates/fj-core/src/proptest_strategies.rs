@@ -83,6 +83,7 @@ pub fn arb_primitive() -> impl Strategy<Value = Primitive> {
         Just(Primitive::ReduceMax),
         Just(Primitive::ReduceMin),
         Just(Primitive::ReduceProd),
+        Just(Primitive::Pad),
     ]
 }
 

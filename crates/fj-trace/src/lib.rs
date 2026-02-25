@@ -491,6 +491,7 @@ impl SimpleTraceContext {
                 }])
             }
             Primitive::Concatenate => infer_concatenate(inputs, params),
+            Primitive::Pad => infer_pad(inputs, params),
             Primitive::DynamicSlice => {
                 // Output shape = slice_sizes param
                 if inputs.is_empty() {
@@ -1273,6 +1274,74 @@ fn infer_concatenate(
 
     Ok(vec![ShapedArray {
         dtype: out_dtype,
+        shape: Shape { dims: out_dims },
+    }])
+}
+
+fn infer_pad(
+    inputs: &[ShapedArray],
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<ShapedArray>, TraceError> {
+    let primitive = Primitive::Pad;
+    if inputs.len() != 2 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!("expected 2 inputs, got {}", inputs.len()),
+        });
+    }
+
+    let operand = &inputs[0];
+    if inputs[1].shape.rank() != 0 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: "pad value must be scalar-shaped".to_owned(),
+        });
+    }
+
+    let rank = operand.shape.rank();
+    let lows = parse_u32_param_list(primitive, params, "padding_low")?;
+    let highs = parse_u32_param_list(primitive, params, "padding_high")?;
+    let interiors = if let Some(raw) = params.get("padding_interior") {
+        parse_u32_list(primitive, "padding_interior", raw)?
+    } else {
+        vec![0_u32; rank]
+    };
+
+    if lows.len() != rank || highs.len() != rank || interiors.len() != rank {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!(
+                "padding rank mismatch: rank={} low={} high={} interior={}",
+                rank,
+                lows.len(),
+                highs.len(),
+                interiors.len()
+            ),
+        });
+    }
+
+    let mut out_dims = Vec::with_capacity(rank);
+    for axis in 0..rank {
+        let dim = operand.shape.dims[axis];
+        let interior_span = dim.saturating_sub(1).checked_mul(interiors[axis]).ok_or(
+            TraceError::ShapeInferenceFailed {
+                primitive,
+                detail: format!("padding interior overflow on axis {axis}"),
+            },
+        )?;
+        let out_dim = lows[axis]
+            .checked_add(dim)
+            .and_then(|v| v.checked_add(interior_span))
+            .and_then(|v| v.checked_add(highs[axis]))
+            .ok_or(TraceError::ShapeInferenceFailed {
+                primitive,
+                detail: format!("padded dimension overflow on axis {axis}"),
+            })?;
+        out_dims.push(out_dim);
+    }
+
+    Ok(vec![ShapedArray {
+        dtype: promote_dtype(operand.dtype, inputs[1].dtype),
         shape: Shape { dims: out_dims },
     }])
 }

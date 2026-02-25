@@ -504,6 +504,146 @@ pub(crate) fn eval_concatenate(
     )?))
 }
 
+/// Pad: add low/high edge padding and interior padding between elements.
+///
+/// Inputs: `[operand, pad_value]`
+/// Params:
+/// - `padding_low`: comma-separated non-negative integers (one per axis)
+/// - `padding_high`: comma-separated non-negative integers (one per axis)
+/// - `padding_interior`: comma-separated non-negative integers (one per axis, optional; defaults to 0)
+pub(crate) fn eval_pad(
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    let primitive = Primitive::Pad;
+    if inputs.len() != 2 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 2,
+            actual: inputs.len(),
+        });
+    }
+
+    let operand = match &inputs[0] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "operand must be a tensor".into(),
+            });
+        }
+    };
+
+    let pad_literal = match &inputs[1] {
+        Value::Scalar(lit) => *lit,
+        Value::Tensor(tensor) if tensor.elements.len() == 1 => tensor.elements[0],
+        _ => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "pad value must be a scalar literal".into(),
+            });
+        }
+    };
+
+    let rank = operand.shape.rank();
+    let lows_raw = parse_i64_param(primitive, "padding_low", params)?;
+    let highs_raw = parse_i64_param(primitive, "padding_high", params)?;
+    let interiors_raw = if params.contains_key("padding_interior") {
+        parse_i64_param(primitive, "padding_interior", params)?
+    } else {
+        vec![0_i64; rank]
+    };
+
+    if lows_raw.len() != rank || highs_raw.len() != rank || interiors_raw.len() != rank {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "padding params must match rank {rank}: low={} high={} interior={}",
+                lows_raw.len(),
+                highs_raw.len(),
+                interiors_raw.len()
+            ),
+        });
+    }
+
+    let mut lows = Vec::with_capacity(rank);
+    let mut interiors = Vec::with_capacity(rank);
+    let mut out_dims = Vec::with_capacity(rank);
+
+    for ax in 0..rank {
+        let low = lows_raw[ax];
+        let high = highs_raw[ax];
+        let interior = interiors_raw[ax];
+        if low < 0 || high < 0 || interior < 0 {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "padding values must be non-negative on axis {ax}: low={low} high={high} interior={interior}"
+                ),
+            });
+        }
+
+        let dim = i64::from(operand.shape.dims[ax]);
+        let interior_span = if dim == 0 { 0 } else { (dim - 1) * interior };
+        let out_dim = low + dim + interior_span + high;
+        if out_dim < 0 || out_dim > i64::from(u32::MAX) {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("padded dimension overflow on axis {ax}: {out_dim}"),
+            });
+        }
+
+        lows.push(low as usize);
+        interiors.push(interior as usize);
+        out_dims.push(out_dim as u32);
+    }
+
+    let out_total: usize = out_dims.iter().map(|d| *d as usize).product();
+    let mut out_elements = vec![pad_literal; out_total];
+
+    if rank == 0 {
+        if !out_elements.is_empty() {
+            out_elements[0] = operand.elements[0];
+        }
+        return Ok(Value::Tensor(TensorValue::new(
+            operand.dtype,
+            Shape { dims: out_dims },
+            out_elements,
+        )?));
+    }
+
+    // Row-major strides.
+    let in_dims = &operand.shape.dims;
+    let mut out_strides = vec![1_usize; rank];
+    for ax in (0..rank.saturating_sub(1)).rev() {
+        out_strides[ax] = out_strides[ax + 1] * out_dims[ax + 1] as usize;
+    }
+
+    let mut in_coords = vec![0_usize; rank];
+    for element in &operand.elements {
+        let mut out_flat = 0_usize;
+        for ax in 0..rank {
+            let coord = lows[ax] + in_coords[ax] * (interiors[ax] + 1);
+            out_flat += coord * out_strides[ax];
+        }
+        out_elements[out_flat] = *element;
+
+        for ax in (0..rank).rev() {
+            in_coords[ax] += 1;
+            if in_coords[ax] < in_dims[ax] as usize {
+                break;
+            }
+            in_coords[ax] = 0;
+        }
+    }
+
+    Ok(Value::Tensor(TensorValue::new(
+        operand.dtype,
+        Shape { dims: out_dims },
+        out_elements,
+    )?))
+}
+
 /// Slice: extract a sub-tensor.
 /// Params: `start_indices` and `limit_indices` (comma-separated u32 lists).
 pub(crate) fn eval_slice(

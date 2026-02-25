@@ -158,7 +158,7 @@ pub fn sample_primitive(cursor: &mut ByteCursor<'_>) -> Primitive {
         // Remaining: reductions + shape ops (index 43 catches them all via _)
         _ => {
             // Distribute among remaining primitives using a second byte
-            match cursor.take_u8() % 11 {
+            match cursor.take_u8() % 12 {
                 0 => Primitive::ReduceSum,
                 1 => Primitive::ReduceMax,
                 2 => Primitive::ReduceMin,
@@ -169,7 +169,8 @@ pub fn sample_primitive(cursor: &mut ByteCursor<'_>) -> Primitive {
                 7 => Primitive::Scatter,
                 8 => Primitive::Transpose,
                 9 => Primitive::BroadcastInDim,
-                _ => Primitive::Concatenate,
+                10 => Primitive::Concatenate,
+                _ => Primitive::Pad,
             }
         }
     }
@@ -183,9 +184,9 @@ pub fn primitive_arity(primitive: Primitive) -> usize {
         | Primitive::Pow | Primitive::Div | Primitive::Rem | Primitive::Atan2
         | Primitive::Dot | Primitive::Gather
         | Primitive::Eq | Primitive::Ne | Primitive::Lt | Primitive::Le
-        | Primitive::Gt | Primitive::Ge | Primitive::Concatenate => 2,
+        | Primitive::Gt | Primitive::Ge | Primitive::Concatenate | Primitive::Pad => 2,
         // Ternary ops
-        Primitive::Select | Primitive::Scatter => 3,
+        Primitive::Select | Primitive::Scatter | Primitive::Clamp => 3,
         // Unary ops
         Primitive::Neg | Primitive::Abs | Primitive::Exp | Primitive::Log
         | Primitive::Sqrt | Primitive::Rsqrt | Primitive::Floor | Primitive::Ceil
@@ -196,7 +197,9 @@ pub fn primitive_arity(primitive: Primitive) -> usize {
         | Primitive::Reciprocal | Primitive::Logistic | Primitive::Erf | Primitive::Erfc
         | Primitive::ReduceSum | Primitive::ReduceMax | Primitive::ReduceMin | Primitive::ReduceProd
         | Primitive::Reshape | Primitive::Slice | Primitive::Transpose
-        | Primitive::BroadcastInDim => 1,
+        | Primitive::BroadcastInDim | Primitive::DynamicSlice => 1,
+        // Nullary ops
+        Primitive::Iota => 0,
     }
 }
 
@@ -368,6 +371,14 @@ pub fn sample_primitive_params(
             params.insert("start_indices".to_owned(), starts.join(","));
             params.insert("limit_indices".to_owned(), limits.join(","));
         }
+        Primitive::DynamicSlice => {
+            let rank = 1 + cursor.take_usize(3);
+            let sizes = (0..rank)
+                .map(|_| (1 + cursor.take_usize(3)).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            params.insert("slice_sizes".to_owned(), sizes);
+        }
         Primitive::Gather => {
             if cursor.take_bool() {
                 let rank = 1 + cursor.take_usize(3);
@@ -410,6 +421,24 @@ pub fn sample_primitive_params(
         Primitive::Concatenate => {
             params.insert("dimension".to_owned(), cursor.take_usize(3).to_string());
         }
+        Primitive::Pad => {
+            let rank = 1 + cursor.take_usize(3);
+            let lows = (0..rank)
+                .map(|_| cursor.take_usize(2).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let highs = (0..rank)
+                .map(|_| cursor.take_usize(2).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let interiors = (0..rank)
+                .map(|_| cursor.take_usize(2).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            params.insert("padding_low".to_owned(), lows);
+            params.insert("padding_high".to_owned(), highs);
+            params.insert("padding_interior".to_owned(), interiors);
+        }
         Primitive::ReduceMax | Primitive::ReduceMin | Primitive::ReduceProd => {
             if cursor.take_bool() {
                 let axis_count = 1 + cursor.take_usize(2);
@@ -419,6 +448,15 @@ pub fn sample_primitive_params(
                     .join(",");
                 params.insert("axes".to_owned(), axes);
             }
+        }
+        Primitive::Iota => {
+            params.insert("length".to_owned(), (1 + cursor.take_usize(8)).to_string());
+            let dtype = match cursor.take_u8() % 3 {
+                0 => "I64",
+                1 => "F64",
+                _ => "I32",
+            };
+            params.insert("dtype".to_owned(), dtype.to_owned());
         }
         Primitive::Add | Primitive::Sub | Primitive::Mul | Primitive::Neg | Primitive::Abs
         | Primitive::Max | Primitive::Min | Primitive::Pow | Primitive::Exp | Primitive::Log
@@ -431,7 +469,7 @@ pub fn sample_primitive_params(
         | Primitive::Div | Primitive::Rem | Primitive::Atan2 | Primitive::Select
         | Primitive::Dot
         | Primitive::Eq | Primitive::Ne | Primitive::Lt | Primitive::Le
-        | Primitive::Gt | Primitive::Ge | Primitive::Scatter => {}
+        | Primitive::Gt | Primitive::Ge | Primitive::Scatter | Primitive::Clamp => {}
     }
 
     params

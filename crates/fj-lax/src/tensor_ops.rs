@@ -1780,6 +1780,16 @@ fn eval_conv_2d(
     params: &BTreeMap<String, String>,
     padding_mode: &str,
 ) -> Result<Value, EvalError> {
+    if rhs.shape.rank() != 4 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "2D conv kernel must have rank 4 [KH, KW, C_in, C_out], got rank {}",
+                rhs.shape.rank()
+            ),
+        });
+    }
+
     let batch = lhs.shape.dims[0] as usize;
     let height = lhs.shape.dims[1] as usize;
     let width = lhs.shape.dims[2] as usize;

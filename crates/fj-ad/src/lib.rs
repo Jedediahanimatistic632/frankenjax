@@ -1393,8 +1393,7 @@ fn vjp(
                         .map(|l| l.as_f64().unwrap_or(0.0))
                         .collect();
 
-                    let dims: Vec<usize> =
-                        xt.shape.dims.iter().map(|&d| d as usize).collect();
+                    let dims: Vec<usize> = xt.shape.dims.iter().map(|&d| d as usize).collect();
                     let mut strides = vec![1usize; rank];
                     for i in (0..rank - 1).rev() {
                         strides[i] = strides[i + 1] * dims[i + 1];
@@ -1429,13 +1428,11 @@ fn vjp(
                             .collect();
                         if descending {
                             indexed.sort_by(|a, b| {
-                                b.1.partial_cmp(&a.1)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
                             });
                         } else {
                             indexed.sort_by(|a, b| {
-                                a.1.partial_cmp(&b.1)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
                             });
                         }
 

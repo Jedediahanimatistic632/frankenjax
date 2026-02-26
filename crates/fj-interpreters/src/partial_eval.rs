@@ -228,6 +228,8 @@ pub fn partial_eval_jaxpr_typed(
                             fj_core::Literal::I64(_) => DType::I64,
                             fj_core::Literal::Bool(_) => DType::Bool,
                             fj_core::Literal::F64Bits(_) => DType::F64,
+                            fj_core::Literal::Complex64Bits(..) => DType::Complex64,
+                            fj_core::Literal::Complex128Bits(..) => DType::Complex128,
                         },
                         shape: Shape::scalar(),
                     }),
@@ -688,6 +690,8 @@ fn abstract_value_of(value: &Value) -> AbstractValue {
                 fj_core::Literal::I64(_) => DType::I64,
                 fj_core::Literal::Bool(_) => DType::Bool,
                 fj_core::Literal::F64Bits(_) => DType::F64,
+                fj_core::Literal::Complex64Bits(..) => DType::Complex64,
+                fj_core::Literal::Complex128Bits(..) => DType::Complex128,
             };
             AbstractValue {
                 dtype,

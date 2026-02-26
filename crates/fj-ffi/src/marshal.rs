@@ -51,6 +51,12 @@ fn scalar_to_buffer(lit: &Literal) -> Result<FfiBuffer, FfiError> {
         Literal::F64Bits(bits) => FfiBuffer::new(bits.to_ne_bytes().to_vec(), vec![], DType::F64),
         Literal::I64(v) => FfiBuffer::new(v.to_ne_bytes().to_vec(), vec![], DType::I64),
         Literal::Bool(v) => FfiBuffer::new(vec![*v as u8], vec![], DType::Bool),
+        Literal::Complex64Bits(..) => Err(FfiError::UnsupportedDtype {
+            dtype: DType::Complex64,
+        }),
+        Literal::Complex128Bits(..) => Err(FfiError::UnsupportedDtype {
+            dtype: DType::Complex128,
+        }),
     }
 }
 
@@ -62,6 +68,16 @@ fn tensor_to_buffer(tv: &TensorValue) -> Result<FfiBuffer, FfiError> {
             Literal::F64Bits(bits) => data.extend_from_slice(&bits.to_ne_bytes()),
             Literal::I64(v) => data.extend_from_slice(&v.to_ne_bytes()),
             Literal::Bool(v) => data.push(*v as u8),
+            Literal::Complex64Bits(..) => {
+                return Err(FfiError::UnsupportedDtype {
+                    dtype: DType::Complex64,
+                });
+            }
+            Literal::Complex128Bits(..) => {
+                return Err(FfiError::UnsupportedDtype {
+                    dtype: DType::Complex128,
+                });
+            }
         }
     }
     let shape: Vec<usize> = tv.shape.dims.iter().map(|&d| d as usize).collect();
@@ -86,7 +102,9 @@ fn bytes_to_literal(bytes: &[u8], dtype: DType) -> Result<Literal, FfiError> {
             })?;
             Ok(Literal::I64(i64::from_ne_bytes(arr)))
         }
-        DType::F32 | DType::I32 => Err(FfiError::UnsupportedDtype { dtype }),
+        DType::F32 | DType::I32 | DType::Complex64 | DType::Complex128 => {
+            Err(FfiError::UnsupportedDtype { dtype })
+        }
         DType::Bool => {
             if bytes.is_empty() {
                 return Err(FfiError::BufferMismatch {

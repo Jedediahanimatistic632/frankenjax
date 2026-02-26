@@ -56,6 +56,8 @@ impl ShapedArray {
                     fj_core::Literal::I64(_) => DType::I64,
                     fj_core::Literal::Bool(_) => DType::Bool,
                     fj_core::Literal::F64Bits(_) => DType::F64,
+                    fj_core::Literal::Complex64Bits(..) => DType::Complex64,
+                    fj_core::Literal::Complex128Bits(..) => DType::Complex128,
                 };
                 Self {
                     dtype,
@@ -1637,9 +1639,11 @@ fn broadcast_shape(lhs: &Shape, rhs: &Shape) -> Option<Shape> {
 }
 
 fn promote_dtype(lhs: DType, rhs: DType) -> DType {
-    use DType::{Bool, F32, F64, I32, I64};
+    use DType::{Bool, Complex64, Complex128, F32, F64, I32, I64};
 
     match (lhs, rhs) {
+        (Complex128, _) | (_, Complex128) => Complex128,
+        (Complex64, _) | (_, Complex64) => Complex64,
         (F64, _) | (_, F64) => F64,
         (F32, _) | (_, F32) => F32,
         (I64, _) | (_, I64) => I64,

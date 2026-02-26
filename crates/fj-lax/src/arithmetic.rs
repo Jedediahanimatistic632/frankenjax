@@ -63,6 +63,8 @@ pub(crate) fn eval_binary_elementwise(
                 Literal::I64(_) => DType::I64,
                 Literal::F64Bits(_) => DType::F64,
                 Literal::Bool(_) => DType::Bool,
+                Literal::Complex64Bits(..) => DType::Complex64,
+                Literal::Complex128Bits(..) => DType::Complex128,
             };
             let dtype = promote_dtype(lhs_dtype, rhs.dtype);
             Ok(Value::Tensor(TensorValue::new(
@@ -83,6 +85,8 @@ pub(crate) fn eval_binary_elementwise(
                 Literal::I64(_) => DType::I64,
                 Literal::F64Bits(_) => DType::F64,
                 Literal::Bool(_) => DType::Bool,
+                Literal::Complex64Bits(..) => DType::Complex64,
+                Literal::Complex128Bits(..) => DType::Complex128,
             };
             let dtype = promote_dtype(lhs.dtype, rhs_dtype);
             Ok(Value::Tensor(TensorValue::new(
@@ -278,6 +282,12 @@ pub(crate) fn eval_unary_int_or_float(
                 primitive,
                 detail: "expected numeric scalar, got bool",
             }),
+            Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                Err(EvalError::TypeMismatch {
+                    primitive,
+                    detail: "complex arithmetic not yet implemented",
+                })
+            }
         },
         Value::Tensor(tensor) => {
             let elements = tensor
@@ -291,6 +301,12 @@ pub(crate) fn eval_unary_int_or_float(
                         primitive,
                         detail: "expected numeric tensor elements, got bool",
                     }),
+                    Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                        Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "complex arithmetic not yet implemented",
+                        })
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -320,17 +336,27 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                 Literal::Bool(b) => *b,
                 Literal::I64(v) => *v != 0,
                 Literal::F64Bits(bits) => f64::from_bits(*bits) != 0.0,
+                Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                    return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "complex condition not yet supported for select",
+                    });
+                }
             };
             let val = if c { *on_true } else { *on_false };
             let lhs_dtype = match on_true {
                 Literal::I64(_) => DType::I64,
                 Literal::F64Bits(_) => DType::F64,
                 Literal::Bool(_) => DType::Bool,
+                Literal::Complex64Bits(..) => DType::Complex64,
+                Literal::Complex128Bits(..) => DType::Complex128,
             };
             let rhs_dtype = match on_false {
                 Literal::I64(_) => DType::I64,
                 Literal::F64Bits(_) => DType::F64,
                 Literal::Bool(_) => DType::Bool,
+                Literal::Complex64Bits(..) => DType::Complex64,
+                Literal::Complex128Bits(..) => DType::Complex128,
             };
             let dtype = promote_dtype(lhs_dtype, rhs_dtype);
             let promoted_val = match dtype {
@@ -349,6 +375,12 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                     Literal::I64(i_val)
                 }
                 DType::Bool => val,
+                DType::Complex64 | DType::Complex128 => {
+                    return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "complex arithmetic not yet implemented",
+                    });
+                }
             };
             Ok(Value::Scalar(promoted_val))
         }
@@ -370,6 +402,12 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                         Literal::Bool(b) => *b,
                         Literal::I64(v) => *v != 0,
                         Literal::F64Bits(bits) => f64::from_bits(*bits) != 0.0,
+                        Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                            return Err(EvalError::TypeMismatch {
+                                primitive,
+                                detail: "complex condition not yet supported for select",
+                            });
+                        }
                     };
                     let val = if flag { *t } else { *f };
                     match dtype {
@@ -388,6 +426,10 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                             Ok(Literal::I64(i_val))
                         }
                         DType::Bool => Ok(val),
+                        DType::Complex64 | DType::Complex128 => Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "complex arithmetic not yet implemented",
+                        }),
                     }
                 })
                 .collect();
@@ -404,11 +446,15 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                     Literal::I64(_) => DType::I64,
                     Literal::F64Bits(_) => DType::F64,
                     Literal::Bool(_) => DType::Bool,
+                    Literal::Complex64Bits(..) => DType::Complex64,
+                    Literal::Complex128Bits(..) => DType::Complex128,
                 },
                 match on_false {
                     Literal::I64(_) => DType::I64,
                     Literal::F64Bits(_) => DType::F64,
                     Literal::Bool(_) => DType::Bool,
+                    Literal::Complex64Bits(..) => DType::Complex64,
+                    Literal::Complex128Bits(..) => DType::Complex128,
                 },
             );
             let elements: Result<Vec<Literal>, EvalError> = cond
@@ -419,6 +465,12 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                         Literal::Bool(b) => *b,
                         Literal::I64(v) => *v != 0,
                         Literal::F64Bits(bits) => f64::from_bits(*bits) != 0.0,
+                        Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                            return Err(EvalError::TypeMismatch {
+                                primitive,
+                                detail: "complex condition not yet supported for select",
+                            });
+                        }
                     };
                     let val = if flag { *on_true } else { *on_false };
                     match dtype {
@@ -437,6 +489,10 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                             Ok(Literal::I64(i_val))
                         }
                         DType::Bool => Ok(val),
+                        DType::Complex64 | DType::Complex128 => Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "complex arithmetic not yet implemented",
+                        }),
                     }
                 })
                 .collect();
@@ -459,6 +515,12 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                 Literal::Bool(b) => *b,
                 Literal::I64(v) => *v != 0,
                 Literal::F64Bits(bits) => f64::from_bits(*bits) != 0.0,
+                Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                    return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "complex condition not yet supported for select",
+                    });
+                }
             };
             if flag {
                 Ok(Value::Tensor(on_true.clone()))
@@ -501,16 +563,25 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
                     Literal::I64(v) => v as f64,
                     Literal::F64Bits(b) => f64::from_bits(b),
                     Literal::Bool(_) => return Err("clamp does not support bool"),
+                    Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                        return Err("complex arithmetic not yet implemented");
+                    }
                 };
                 let lof = match lo {
                     Literal::I64(v) => v as f64,
                     Literal::F64Bits(b) => f64::from_bits(b),
                     Literal::Bool(_) => return Err("clamp does not support bool"),
+                    Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                        return Err("complex arithmetic not yet implemented");
+                    }
                 };
                 let hif = match hi {
                     Literal::I64(v) => v as f64,
                     Literal::F64Bits(b) => f64::from_bits(b),
                     Literal::Bool(_) => return Err("clamp does not support bool"),
+                    Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                        return Err("complex arithmetic not yet implemented");
+                    }
                 };
                 Ok(Literal::from_f64(xf.max(lof).min(hif)))
             }

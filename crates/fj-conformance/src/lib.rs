@@ -913,6 +913,8 @@ fn value_type_runtime(actual: &Value) -> &'static str {
             fj_core::Literal::I64(_) => "i64",
             fj_core::Literal::F64Bits(_) => "f64",
             fj_core::Literal::Bool(_) => "bool",
+            fj_core::Literal::Complex64Bits(..) => "complex64",
+            fj_core::Literal::Complex128Bits(..) => "complex128",
         };
     }
 
@@ -921,6 +923,8 @@ fn value_type_runtime(actual: &Value) -> &'static str {
             fj_core::DType::I64 | fj_core::DType::I32 => "i64",
             fj_core::DType::F64 | fj_core::DType::F32 => "f64",
             fj_core::DType::Bool => "bool",
+            fj_core::DType::Complex64 => "complex64",
+            fj_core::DType::Complex128 => "complex128",
         };
     }
 

@@ -8,6 +8,10 @@ pub fn arb_literal() -> impl Strategy<Value = Literal> {
         any::<i64>().prop_map(Literal::I64),
         any::<bool>().prop_map(Literal::Bool),
         prop::num::f64::NORMAL.prop_map(Literal::from_f64),
+        (prop::num::f32::NORMAL, prop::num::f32::NORMAL)
+            .prop_map(|(re, im)| Literal::from_complex64(re, im)),
+        (prop::num::f64::NORMAL, prop::num::f64::NORMAL)
+            .prop_map(|(re, im)| Literal::from_complex128(re, im)),
     ]
 }
 
@@ -104,6 +108,8 @@ pub fn arb_dtype() -> impl Strategy<Value = DType> {
         Just(DType::I32),
         Just(DType::I64),
         Just(DType::Bool),
+        Just(DType::Complex64),
+        Just(DType::Complex128),
     ]
 }
 
@@ -171,6 +177,29 @@ mod tests {
             ttl.push_transform(transform, "evidence");
             let proof = verify_transform_composition(&ttl);
             prop_assert!(proof.is_ok());
+        }
+
+        #[test]
+        fn prop_complex64_literal_roundtrip(re in prop::num::f32::NORMAL, im in prop::num::f32::NORMAL) {
+            let lit = Literal::from_complex64(re, im);
+            let (got_re, got_im) = lit.as_complex64().unwrap();
+            prop_assert_eq!(re, got_re);
+            prop_assert_eq!(im, got_im);
+        }
+
+        #[test]
+        fn prop_complex128_literal_roundtrip(re in prop::num::f64::NORMAL, im in prop::num::f64::NORMAL) {
+            let lit = Literal::from_complex128(re, im);
+            let (got_re, got_im) = lit.as_complex128().unwrap();
+            prop_assert_eq!(re, got_re);
+            prop_assert_eq!(im, got_im);
+        }
+
+        #[test]
+        fn prop_complex_serde_roundtrip(lit in arb_literal()) {
+            let json = serde_json::to_string(&lit).unwrap();
+            let deser: Literal = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(lit, deser);
         }
     }
 }

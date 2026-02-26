@@ -8,8 +8,10 @@ use crate::EvalError;
 /// Returns I64 if all are I64, Bool if all are Bool, otherwise F64.
 #[inline]
 pub(crate) fn promote_dtype(lhs: DType, rhs: DType) -> DType {
-    use DType::{Bool, F32, F64, I32, I64};
+    use DType::{Bool, Complex64, Complex128, F32, F64, I32, I64};
     match (lhs, rhs) {
+        (Complex128, _) | (_, Complex128) => Complex128,
+        (Complex64, _) | (_, Complex64) => Complex64,
         (F64, _) | (_, F64) => F64,
         (F32, _) | (_, F32) => F32,
         (I64, _) | (_, I64) => I64,

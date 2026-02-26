@@ -21,6 +21,8 @@ pub enum DType {
     I32,
     I64,
     Bool,
+    Complex64,
+    Complex128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,6 +272,8 @@ pub enum Literal {
     I64(i64),
     Bool(bool),
     F64Bits(u64),
+    Complex64Bits(u32, u32),
+    Complex128Bits(u64, u64),
 }
 
 impl Literal {
@@ -279,11 +283,21 @@ impl Literal {
     }
 
     #[must_use]
+    pub fn from_complex64(re: f32, im: f32) -> Self {
+        Self::Complex64Bits(re.to_bits(), im.to_bits())
+    }
+
+    #[must_use]
+    pub fn from_complex128(re: f64, im: f64) -> Self {
+        Self::Complex128Bits(re.to_bits(), im.to_bits())
+    }
+
+    #[must_use]
     pub fn as_f64(self) -> Option<f64> {
         match self {
             Self::F64Bits(bits) => Some(f64::from_bits(bits)),
             Self::I64(value) => Some(value as f64),
-            Self::Bool(_) => None,
+            Self::Bool(_) | Self::Complex64Bits(..) | Self::Complex128Bits(..) => None,
         }
     }
 
@@ -291,13 +305,37 @@ impl Literal {
     pub fn as_i64(self) -> Option<i64> {
         match self {
             Self::I64(value) => Some(value),
-            Self::Bool(_) | Self::F64Bits(_) => None,
+            Self::Bool(_)
+            | Self::F64Bits(_)
+            | Self::Complex64Bits(..)
+            | Self::Complex128Bits(..) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_complex64(self) -> Option<(f32, f32)> {
+        match self {
+            Self::Complex64Bits(re, im) => Some((f32::from_bits(re), f32::from_bits(im))),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_complex128(self) -> Option<(f64, f64)> {
+        match self {
+            Self::Complex128Bits(re, im) => Some((f64::from_bits(re), f64::from_bits(im))),
+            _ => None,
         }
     }
 
     #[must_use]
     pub fn is_integral(self) -> bool {
         matches!(self, Self::I64(_))
+    }
+
+    #[must_use]
+    pub fn is_complex(self) -> bool {
+        matches!(self, Self::Complex64Bits(..) | Self::Complex128Bits(..))
     }
 }
 
@@ -321,6 +359,16 @@ impl Value {
     #[must_use]
     pub fn scalar_bool(value: bool) -> Self {
         Self::Scalar(Literal::Bool(value))
+    }
+
+    #[must_use]
+    pub fn scalar_complex64(re: f32, im: f32) -> Self {
+        Self::Scalar(Literal::from_complex64(re, im))
+    }
+
+    #[must_use]
+    pub fn scalar_complex128(re: f64, im: f64) -> Self {
+        Self::Scalar(Literal::from_complex128(re, im))
     }
 
     pub fn vector_i64(values: &[i64]) -> Result<Self, ValueError> {
@@ -378,6 +426,8 @@ impl Value {
                 Literal::I64(_) => DType::I64,
                 Literal::Bool(_) => DType::Bool,
                 Literal::F64Bits(_) => DType::F64,
+                Literal::Complex64Bits(..) => DType::Complex64,
+                Literal::Complex128Bits(..) => DType::Complex128,
             },
             Self::Tensor(t) => t.dtype,
         }
@@ -867,6 +917,12 @@ fn write_literal(out: &mut String, lit: Literal) {
         }
         Literal::F64Bits(value) => {
             let _ = write!(out, "f64bits:{value}");
+        }
+        Literal::Complex64Bits(re, im) => {
+            let _ = write!(out, "c64:{re},{im}");
+        }
+        Literal::Complex128Bits(re, im) => {
+            let _ = write!(out, "c128:{re},{im}");
         }
     }
 }
@@ -2479,5 +2535,121 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.to_i64_vec(), None);
+    }
+
+    // ── Complex type tests (bd-1hx8) ────────────────────────────
+
+    #[test]
+    fn test_dtype_complex64_exists() {
+        let dt = DType::Complex64;
+        assert_ne!(dt, DType::F64);
+        assert_ne!(dt, DType::Complex128);
+    }
+
+    #[test]
+    fn test_dtype_complex128_exists() {
+        let dt = DType::Complex128;
+        assert_ne!(dt, DType::F64);
+        assert_ne!(dt, DType::Complex64);
+    }
+
+    #[test]
+    fn test_literal_complex64_roundtrip() {
+        let lit = Literal::from_complex64(1.0_f32, 2.0_f32);
+        let (re, im) = lit.as_complex64().unwrap();
+        assert_eq!(re, 1.0_f32);
+        assert_eq!(im, 2.0_f32);
+    }
+
+    #[test]
+    fn test_literal_complex128_roundtrip() {
+        let lit = Literal::from_complex128(3.14_f64, -2.71_f64);
+        let (re, im) = lit.as_complex128().unwrap();
+        assert_eq!(re, 3.14_f64);
+        assert_eq!(im, -2.71_f64);
+    }
+
+    #[test]
+    fn test_literal_complex64_zero() {
+        let lit = Literal::from_complex64(0.0, 0.0);
+        let (re, im) = lit.as_complex64().unwrap();
+        assert_eq!(re, 0.0_f32);
+        assert_eq!(im, 0.0_f32);
+    }
+
+    #[test]
+    fn test_literal_complex64_pure_imaginary() {
+        let lit = Literal::from_complex64(0.0, 1.0);
+        let (re, im) = lit.as_complex64().unwrap();
+        assert_eq!(re, 0.0_f32);
+        assert_eq!(im, 1.0_f32);
+    }
+
+    #[test]
+    fn test_tensor_value_complex64_storage() {
+        let elements = vec![
+            Literal::from_complex64(1.0, 2.0),
+            Literal::from_complex64(3.0, 4.0),
+        ];
+        let t = TensorValue::new(DType::Complex64, Shape::vector(2), elements).unwrap();
+        assert_eq!(t.dtype, DType::Complex64);
+        assert_eq!(t.elements.len(), 2);
+        assert_eq!(t.elements[0].as_complex64(), Some((1.0, 2.0)));
+        assert_eq!(t.elements[1].as_complex64(), Some((3.0, 4.0)));
+    }
+
+    #[test]
+    fn test_tensor_value_complex128_storage() {
+        let elements = vec![
+            Literal::from_complex128(1.5, -0.5),
+            Literal::from_complex128(2.5, 3.5),
+            Literal::from_complex128(0.0, 0.0),
+        ];
+        let t = TensorValue::new(DType::Complex128, Shape::vector(3), elements).unwrap();
+        assert_eq!(t.dtype, DType::Complex128);
+        assert_eq!(t.elements.len(), 3);
+        assert_eq!(t.elements[0].as_complex128(), Some((1.5, -0.5)));
+        assert_eq!(t.elements[2].as_complex128(), Some((0.0, 0.0)));
+    }
+
+    #[test]
+    fn test_complex_serde_roundtrip() {
+        let lit = Literal::from_complex128(std::f64::consts::PI, std::f64::consts::E);
+        let json = serde_json::to_string(&lit).unwrap();
+        let deser: Literal = serde_json::from_str(&json).unwrap();
+        assert_eq!(lit, deser);
+        let (re, im) = deser.as_complex128().unwrap();
+        assert_eq!(re, std::f64::consts::PI);
+        assert_eq!(im, std::f64::consts::E);
+    }
+
+    #[test]
+    fn test_complex_value_dtype() {
+        let v = Value::scalar_complex64(1.0, 2.0);
+        assert_eq!(v.dtype(), DType::Complex64);
+        let v = Value::scalar_complex128(3.0, 4.0);
+        assert_eq!(v.dtype(), DType::Complex128);
+    }
+
+    #[test]
+    fn test_literal_is_complex() {
+        assert!(Literal::from_complex64(1.0, 0.0).is_complex());
+        assert!(Literal::from_complex128(1.0, 0.0).is_complex());
+        assert!(!Literal::from_f64(1.0).is_complex());
+        assert!(!Literal::I64(1).is_complex());
+    }
+
+    #[test]
+    fn test_complex64_as_f64_returns_none() {
+        let lit = Literal::from_complex64(1.0, 2.0);
+        assert!(lit.as_f64().is_none());
+        assert!(lit.as_i64().is_none());
+    }
+
+    #[test]
+    fn test_complex128_as_f64_returns_none() {
+        let lit = Literal::from_complex128(1.0, 2.0);
+        assert!(lit.as_f64().is_none());
+        assert!(lit.as_i64().is_none());
     }
 }

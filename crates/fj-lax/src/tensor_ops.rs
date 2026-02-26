@@ -93,6 +93,8 @@ pub(crate) fn eval_reshape(
                     Literal::I64(_) => DType::I64,
                     Literal::F64Bits(_) => DType::F64,
                     Literal::Bool(_) => DType::Bool,
+                    Literal::Complex64Bits(..) => DType::Complex64,
+                    Literal::Complex128Bits(..) => DType::Complex128,
                 },
                 Shape { dims },
                 vec![*lit],
@@ -290,6 +292,8 @@ pub(crate) fn eval_broadcast_in_dim(
                 Literal::I64(_) => DType::I64,
                 Literal::F64Bits(_) => DType::F64,
                 Literal::Bool(_) => DType::Bool,
+                Literal::Complex64Bits(..) => DType::Complex64,
+                Literal::Complex128Bits(..) => DType::Complex128,
             };
             Ok(Value::Tensor(TensorValue::new(
                 dtype,
@@ -1025,6 +1029,10 @@ fn lit_to_usize(lit: &Literal, primitive: Primitive) -> Result<usize, EvalError>
             primitive,
             detail: "float indices not supported".into(),
         }),
+        Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => Err(EvalError::Unsupported {
+            primitive,
+            detail: "complex indices not supported".into(),
+        }),
     }
 }
 
@@ -1093,6 +1101,12 @@ pub(crate) fn eval_dynamic_slice(
                         } else {
                             0
                         }
+                    }
+                    Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                        return Err(EvalError::Unsupported {
+                            primitive,
+                            detail: format!("complex start index not supported for axis {ax}"),
+                        });
                     }
                 };
                 // Clamp to valid range [0, dim - size]
@@ -1225,6 +1239,12 @@ pub(crate) fn eval_dynamic_update_slice(
                     Literal::I64(v) => *v,
                     Literal::F64Bits(b) => f64::from_bits(*b) as i64,
                     Literal::Bool(b) => i64::from(*b),
+                    Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+                        return Err(EvalError::Unsupported {
+                            primitive,
+                            detail: format!("complex start index not supported for axis {ax}"),
+                        });
+                    }
                 };
                 let dim = operand.shape.dims[ax] as i64;
                 let upd_size = update.shape.dims[ax] as i64;

@@ -96,6 +96,8 @@ pub fn dtype_size_bytes(dtype: DType) -> Result<usize, FfiError> {
         DType::F32 => Ok(4),
         DType::I32 => Ok(4),
         DType::Bool => Ok(1),
+        DType::Complex64 => Ok(8),
+        DType::Complex128 => Ok(16),
     }
 }
 

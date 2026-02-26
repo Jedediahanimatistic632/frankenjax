@@ -123,12 +123,14 @@ fn zeros_like(v: &Value) -> Value {
             Literal::I64(_) => Value::scalar_i64(0),
             Literal::Bool(_) => Value::scalar_f64(0.0),
             Literal::F64Bits(_) => Value::scalar_f64(0.0),
+            Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => Value::scalar_f64(0.0),
         },
         Value::Tensor(t) => {
             let (zero_lit, out_dtype) = match t.dtype {
                 DType::I64 | DType::I32 => (Literal::I64(0), DType::I64),
                 DType::Bool => (Literal::from_f64(0.0), DType::F64),
                 DType::F64 | DType::F32 => (Literal::from_f64(0.0), DType::F64),
+                DType::Complex64 | DType::Complex128 => (Literal::from_f64(0.0), DType::F64),
             };
             let elements = vec![zero_lit; t.elements.len()];
             Value::Tensor(
@@ -145,6 +147,7 @@ fn ones_like(v: &Value) -> Value {
             Literal::I64(_) => Value::scalar_f64(1.0),
             Literal::Bool(_) => Value::scalar_f64(1.0),
             Literal::F64Bits(_) => Value::scalar_f64(1.0),
+            Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => Value::scalar_f64(1.0),
         },
         Value::Tensor(t) => {
             let elements = vec![Literal::from_f64(1.0); t.elements.len()];
@@ -185,10 +188,22 @@ fn is_zero_value(v: &Value) -> bool {
         Value::Scalar(Literal::F64Bits(bits)) => f64::from_bits(*bits) == 0.0,
         Value::Scalar(Literal::I64(val)) => *val == 0,
         Value::Scalar(Literal::Bool(val)) => !val,
+        Value::Scalar(Literal::Complex64Bits(re, im)) => {
+            f32::from_bits(*re) == 0.0 && f32::from_bits(*im) == 0.0
+        }
+        Value::Scalar(Literal::Complex128Bits(re, im)) => {
+            f64::from_bits(*re) == 0.0 && f64::from_bits(*im) == 0.0
+        }
         Value::Tensor(t) => t.elements.iter().all(|e| match e {
             Literal::F64Bits(bits) => f64::from_bits(*bits) == 0.0,
             Literal::I64(v) => *v == 0,
             Literal::Bool(v) => !v,
+            Literal::Complex64Bits(re, im) => {
+                f32::from_bits(*re) == 0.0 && f32::from_bits(*im) == 0.0
+            }
+            Literal::Complex128Bits(re, im) => {
+                f64::from_bits(*re) == 0.0 && f64::from_bits(*im) == 0.0
+            }
         }),
     }
 }
@@ -1710,6 +1725,7 @@ fn dynamic_update_slice_vjp(inputs: &[Value], g: &Value) -> Result<Vec<Value>, A
                     Literal::I64(v) => *v,
                     Literal::F64Bits(b) => f64::from_bits(*b) as i64,
                     Literal::Bool(b) => i64::from(*b),
+                    Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => 0,
                 };
                 let dim = g_tensor.shape.dims[ax] as i64;
                 let upd_size = update.shape.dims[ax] as i64;

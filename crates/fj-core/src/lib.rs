@@ -147,6 +147,7 @@ pub enum Primitive {
     Cond,
     Scan,
     While,
+    Switch,
     // Bitwise
     BitwiseAnd,
     BitwiseOr,
@@ -233,6 +234,7 @@ impl Primitive {
             Self::Cond => "cond",
             Self::Scan => "scan",
             Self::While => "while_loop",
+            Self::Switch => "switch",
             Self::BitwiseAnd => "bitwise_and",
             Self::BitwiseOr => "bitwise_or",
             Self::BitwiseXor => "bitwise_xor",

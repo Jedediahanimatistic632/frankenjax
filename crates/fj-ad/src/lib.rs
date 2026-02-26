@@ -1503,6 +1503,22 @@ fn vjp(
             while_vjp(inputs, g, params)
         }
 
+        Primitive::Switch => {
+            // Switch VJP: gradient flows through the selected branch only.
+            // Index has no gradient; gradient for selected branch equals g,
+            // all other branches get zero gradient.
+            let mut grads = vec![zeros_like(&inputs[0])]; // index: no grad
+            for (i, inp) in inputs[1..].iter().enumerate() {
+                let idx = inputs[0].as_i64_scalar().unwrap_or(0) as usize;
+                if i == idx {
+                    grads.push(g.clone());
+                } else {
+                    grads.push(zeros_like(inp));
+                }
+            }
+            Ok(grads)
+        }
+
         // Bitwise ops are not differentiable — gradient is zero.
         Primitive::BitwiseAnd | Primitive::BitwiseOr | Primitive::BitwiseXor => {
             Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])])

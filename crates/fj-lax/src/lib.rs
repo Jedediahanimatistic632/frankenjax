@@ -298,6 +298,7 @@ pub fn eval_primitive(
         Primitive::Cond => eval_cond(primitive, inputs),
         Primitive::Scan => eval_scan(primitive, inputs, params),
         Primitive::While => eval_while_loop(primitive, inputs, params),
+        Primitive::Switch => eval_switch(primitive, inputs, params),
         // Bitwise
         Primitive::BitwiseAnd => eval_bitwise_binary(primitive, inputs, |a, b| a & b),
         Primitive::BitwiseOr => eval_bitwise_binary(primitive, inputs, |a, b| a | b),
@@ -734,6 +735,96 @@ fn value_shape_fingerprint(v: &Value) -> String {
         }
         Value::Tensor(t) => format!("tensor:{:?}:{:?}", t.dtype, t.shape.dims),
     }
+}
+
+/// Evaluate Switch: multi-branch conditional.
+///
+/// inputs: [index, operand, branch0_result, branch1_result, ...]
+///   - index: integer selecting which branch to take
+///   - operand: passed to the selected branch (unused in primitive form)
+///   - branch results: pre-computed results for each branch
+///
+/// In primitive form (no sub_jaxprs), the branches are pre-evaluated and
+/// switch simply selects the correct output by index. With sub_jaxprs,
+/// only the selected branch would be evaluated.
+///
+/// params:
+///   - "num_branches": number of branches (required)
+fn eval_switch(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    if inputs.len() < 2 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 2,
+            actual: inputs.len(),
+        });
+    }
+
+    let index_val = match &inputs[0] {
+        Value::Scalar(Literal::I64(i)) => *i,
+        Value::Scalar(Literal::Bool(b)) => i64::from(*b),
+        other => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("switch index must be integer, got {:?}", other.dtype()),
+            });
+        }
+    };
+
+    let num_branches = params
+        .get("num_branches")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(inputs.len().saturating_sub(1));
+
+    if index_val < 0 || index_val as usize >= num_branches {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "switch index {index_val} out of bounds for {num_branches} branches"
+            ),
+        });
+    }
+
+    // Branch values start at inputs[1]
+    let branch_idx = index_val as usize;
+    if branch_idx + 1 >= inputs.len() {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "switch index {branch_idx} but only {} branch values provided",
+                inputs.len() - 1
+            ),
+        });
+    }
+
+    Ok(inputs[branch_idx + 1].clone())
+}
+
+/// Evaluate fori_loop: `fori_loop(lower, upper, body_fn, init_val) -> final_val`.
+///
+/// Desugars to a while_loop with an explicit counter:
+///   carry = (counter=lower, val=init_val)
+///   while counter < upper:
+///     val = body_fn(counter, val)
+///     counter += 1
+///   return val
+pub fn eval_fori_loop<B>(
+    lower: i64,
+    upper: i64,
+    init_val: Value,
+    mut body_fn: B,
+) -> Result<Value, EvalError>
+where
+    B: FnMut(i64, Value) -> Result<Value, EvalError>,
+{
+    let mut val = init_val;
+    for i in lower..upper {
+        val = body_fn(i, val)?;
+    }
+    Ok(val)
 }
 
 /// Evaluate a binary bitwise operation on integer values.

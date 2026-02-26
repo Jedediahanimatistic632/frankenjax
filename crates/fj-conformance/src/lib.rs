@@ -539,6 +539,148 @@ const fn default_comparator_kind() -> ComparatorKind {
     ComparatorKind::ApproxAtolRtol
 }
 
+// ── Per-dtype tolerance tiers ──────────────────────────────────────
+
+/// Per-dtype tolerance tier for numerical comparisons.
+///
+/// Follows JAX's tolerance conventions:
+/// - F64: tight (1e-12 / 1e-10) since double-precision is highly reproducible
+/// - F32: moderate (1e-5 / 1e-5) matching JAX's default for single-precision
+/// - I32/I64/Bool: exact (0.0 / 0.0) since integer ops are deterministic
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ToleranceTier {
+    pub atol: f64,
+    pub rtol: f64,
+}
+
+impl ToleranceTier {
+    #[must_use]
+    pub const fn exact() -> Self {
+        Self {
+            atol: 0.0,
+            rtol: 0.0,
+        }
+    }
+
+    #[must_use]
+    pub const fn for_dtype(dtype: fj_core::DType) -> Self {
+        use fj_core::DType;
+        match dtype {
+            DType::F64 | DType::Complex128 => Self {
+                atol: 1e-12,
+                rtol: 1e-10,
+            },
+            DType::F32 | DType::Complex64 => Self {
+                atol: 1e-5,
+                rtol: 1e-5,
+            },
+            DType::I32 | DType::I64 | DType::Bool => Self::exact(),
+        }
+    }
+
+    /// Returns the effective tolerance, taking the wider of the dtype default
+    /// and the fixture-specified override.
+    #[must_use]
+    pub fn resolve(dtype: fj_core::DType, fixture_atol: f64, fixture_rtol: f64) -> Self {
+        let tier = Self::for_dtype(dtype);
+        Self {
+            atol: tier.atol.max(fixture_atol),
+            rtol: tier.rtol.max(fixture_rtol),
+        }
+    }
+}
+
+// ── Tolerance violation reporting ──────────────────────────────────
+
+/// A single tolerance violation for reporting purposes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToleranceViolation {
+    pub case_id: String,
+    pub output_index: usize,
+    pub element_index: usize,
+    pub expected: f64,
+    pub actual: f64,
+    pub abs_diff: f64,
+    pub tolerance_used: f64,
+}
+
+/// Summary of tolerance violations for a fixture bundle run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToleranceReport {
+    pub total_comparisons: usize,
+    pub violations: Vec<ToleranceViolation>,
+    pub max_abs_error: f64,
+    pub mean_abs_error: f64,
+}
+
+impl ToleranceReport {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            total_comparisons: 0,
+            violations: Vec::new(),
+            max_abs_error: 0.0,
+            mean_abs_error: 0.0,
+        }
+    }
+
+    /// Record a comparison result.
+    pub fn record(
+        &mut self,
+        case_id: &str,
+        output_idx: usize,
+        elem_idx: usize,
+        expected: f64,
+        actual: f64,
+        tolerance: f64,
+    ) {
+        self.total_comparisons += 1;
+        let abs_diff = (expected - actual).abs();
+        if abs_diff > self.max_abs_error {
+            self.max_abs_error = abs_diff;
+        }
+        if abs_diff > tolerance {
+            self.violations.push(ToleranceViolation {
+                case_id: case_id.to_owned(),
+                output_index: output_idx,
+                element_index: elem_idx,
+                expected,
+                actual,
+                abs_diff,
+                tolerance_used: tolerance,
+            });
+        }
+    }
+
+    /// Finalize the report by computing the mean absolute error.
+    pub fn finalize(&mut self, error_sum: f64) {
+        if self.total_comparisons > 0 {
+            self.mean_abs_error = error_sum / self.total_comparisons as f64;
+        }
+    }
+
+    /// Whether all comparisons passed.
+    #[must_use]
+    pub fn all_passed(&self) -> bool {
+        self.violations.is_empty()
+    }
+}
+
+impl Default for ToleranceReport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Infer the FixtureValue's dtype for tolerance tier selection.
+#[must_use]
+pub fn fixture_value_dtype(value: &FixtureValue) -> fj_core::DType {
+    match value {
+        FixtureValue::ScalarF64 { .. } | FixtureValue::VectorF64 { .. } => fj_core::DType::F64,
+        FixtureValue::ScalarI64 { .. } | FixtureValue::VectorI64 { .. } => fj_core::DType::I64,
+    }
+}
+
 const fn default_case_timeout() -> Duration {
     Duration::from_secs(2)
 }
@@ -843,6 +985,16 @@ fn approx_equal(expected: f64, actual: f64, atol: f64, rtol: f64) -> bool {
 }
 
 fn compare_outputs(case: &TransformFixtureCase, actual: &[Value]) -> bool {
+    compare_outputs_with_report(case, actual, None)
+}
+
+/// Compare outputs with optional tolerance reporting.
+/// When `report` is Some, records every numeric comparison for analysis.
+fn compare_outputs_with_report(
+    case: &TransformFixtureCase,
+    actual: &[Value],
+    report: Option<&mut ToleranceReport>,
+) -> bool {
     if case.expected.len() != actual.len() {
         return false;
     }
@@ -859,12 +1011,33 @@ fn compare_outputs(case: &TransformFixtureCase, actual: &[Value]) -> bool {
                 })
         }
         ComparatorKind::ApproxAtolRtol => {
-            case.expected
-                .iter()
-                .zip(actual.iter())
-                .all(|(expected, actual_value)| {
-                    expected.approx_matches(actual_value, case.atol, case.rtol)
-                })
+            let mut all_match = true;
+            for (expected, actual_value) in case.expected.iter().zip(actual.iter()) {
+                let dtype = fixture_value_dtype(expected);
+                let tier = ToleranceTier::resolve(dtype, case.atol, case.rtol);
+                let matched = expected.approx_matches(actual_value, tier.atol, tier.rtol);
+                if !matched {
+                    all_match = false;
+                }
+            }
+            // Record detailed comparisons if reporting is enabled
+            if let Some(rep) = report {
+                for (out_idx, (expected, actual_value)) in
+                    case.expected.iter().zip(actual.iter()).enumerate()
+                {
+                    let dtype = fixture_value_dtype(expected);
+                    let tier = ToleranceTier::resolve(dtype, case.atol, case.rtol);
+                    record_fixture_comparison(
+                        rep,
+                        &case.case_id,
+                        out_idx,
+                        expected,
+                        actual_value,
+                        tier.atol + tier.rtol,
+                    );
+                }
+            }
+            all_match
         }
         ComparatorKind::ShapeOnly => {
             case.expected
@@ -881,6 +1054,34 @@ fn compare_outputs(case: &TransformFixtureCase, actual: &[Value]) -> bool {
                 .all(|(expected, actual_value)| {
                     value_type_fingerprint(expected) == value_type_runtime(actual_value)
                 })
+        }
+    }
+}
+
+/// Record detailed per-element comparisons into the tolerance report.
+fn record_fixture_comparison(
+    report: &mut ToleranceReport,
+    case_id: &str,
+    output_idx: usize,
+    expected: &FixtureValue,
+    actual: &Value,
+    tolerance: f64,
+) {
+    match expected {
+        FixtureValue::ScalarF64 { value } => {
+            if let Some(actual_val) = actual.as_f64_scalar() {
+                report.record(case_id, output_idx, 0, *value, actual_val, tolerance);
+            }
+        }
+        FixtureValue::VectorF64 { values } => {
+            if let Some(actual_vals) = actual.as_tensor().and_then(|t| t.to_f64_vec()) {
+                for (elem_idx, (exp, act)) in values.iter().zip(actual_vals.iter()).enumerate() {
+                    report.record(case_id, output_idx, elem_idx, *exp, *act, tolerance);
+                }
+            }
+        }
+        FixtureValue::ScalarI64 { .. } | FixtureValue::VectorI64 { .. } => {
+            // Integer comparisons are exact, no tolerance reporting needed
         }
     }
 }
@@ -1310,6 +1511,136 @@ mod tests {
             result.bundle.cases.len() >= 50,
             "expected expanded fixture corpus, got {}",
             result.bundle.cases.len()
+        );
+    }
+
+    // ── Tolerance tier tests (bd-2l5q) ───────────────────────────
+
+    #[test]
+    fn test_tolerance_f64_default() {
+        let tier = super::ToleranceTier::for_dtype(fj_core::DType::F64);
+        assert_eq!(tier.atol, 1e-12, "F64 atol should be 1e-12");
+        assert_eq!(tier.rtol, 1e-10, "F64 rtol should be 1e-10");
+    }
+
+    #[test]
+    fn test_tolerance_f32_default() {
+        let tier = super::ToleranceTier::for_dtype(fj_core::DType::F32);
+        assert_eq!(tier.atol, 1e-5, "F32 atol should be 1e-5");
+        assert_eq!(tier.rtol, 1e-5, "F32 rtol should be 1e-5");
+    }
+
+    #[test]
+    fn test_tolerance_i32_exact() {
+        let tier = super::ToleranceTier::for_dtype(fj_core::DType::I32);
+        assert_eq!(tier.atol, 0.0, "I32 should use exact comparison");
+        assert_eq!(tier.rtol, 0.0, "I32 should use exact comparison");
+    }
+
+    #[test]
+    fn test_tolerance_i64_exact() {
+        let tier = super::ToleranceTier::for_dtype(fj_core::DType::I64);
+        assert_eq!(tier.atol, 0.0);
+        assert_eq!(tier.rtol, 0.0);
+    }
+
+    #[test]
+    fn test_tolerance_bool_exact() {
+        let tier = super::ToleranceTier::for_dtype(fj_core::DType::Bool);
+        assert_eq!(tier.atol, 0.0);
+        assert_eq!(tier.rtol, 0.0);
+    }
+
+    #[test]
+    fn test_tolerance_per_fixture_override() {
+        // Fixture specifies wider tolerance → resolve takes the wider
+        let tier = super::ToleranceTier::resolve(fj_core::DType::F64, 1e-6, 1e-6);
+        assert!(
+            tier.atol >= 1e-6,
+            "resolve should take wider: got {}",
+            tier.atol
+        );
+        assert!(
+            tier.rtol >= 1e-6,
+            "resolve should take wider: got {}",
+            tier.rtol
+        );
+    }
+
+    #[test]
+    fn test_tolerance_erf_wider() {
+        // erf/erfc fixtures should be allowed wider tolerance
+        // When fixture specifies 1e-4, resolve should use that over F64's 1e-12
+        let tier = super::ToleranceTier::resolve(fj_core::DType::F64, 1e-4, 1e-4);
+        assert_eq!(tier.atol, 1e-4, "erf override should use 1e-4");
+        assert_eq!(tier.rtol, 1e-4, "erf override should use 1e-4");
+    }
+
+    #[test]
+    fn test_tolerance_violation_report() {
+        let mut report = super::ToleranceReport::new();
+        // Record a passing comparison
+        report.record("case_ok", 0, 0, 1.0, 1.0 + 1e-13, 1e-12);
+        assert!(report.all_passed(), "within tolerance should pass");
+
+        // Record a failing comparison
+        report.record("case_fail", 0, 0, 1.0, 1.5, 1e-12);
+        assert!(
+            !report.all_passed(),
+            "exceeded tolerance should produce violation"
+        );
+        assert_eq!(report.violations.len(), 1);
+        assert_eq!(report.violations[0].case_id, "case_fail");
+        assert!((report.violations[0].abs_diff - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_tolerance_report_statistics() {
+        let mut report = super::ToleranceReport::new();
+        report.record("c1", 0, 0, 1.0, 1.1, 1e-6);
+        report.record("c2", 0, 0, 2.0, 2.0001, 1e-3);
+        report.finalize(0.1 + 0.0001);
+
+        assert_eq!(report.total_comparisons, 2);
+        assert!((report.max_abs_error - 0.1).abs() < 1e-10);
+        assert!(report.mean_abs_error > 0.0);
+    }
+
+    #[test]
+    fn test_existing_fixtures_still_pass_with_tight_tolerances() {
+        // Run the full fixture bundle with the tightened tolerances
+        let cfg = HarnessConfig::default_paths();
+        let fixture_path = cfg
+            .fixture_root
+            .join("transforms/legacy_transform_cases.v1.json");
+        let bundle =
+            super::read_transform_fixture_bundle(&fixture_path).expect("bundle should load");
+        let report = run_transform_fixture_bundle(&cfg, &bundle);
+
+        assert_eq!(
+            report.mismatched_cases, 0,
+            "all fixtures should pass with tightened tolerances (got {} mismatches out of {})",
+            report.mismatched_cases, report.total_cases
+        );
+    }
+
+    #[test]
+    fn test_fixture_value_dtype_inference() {
+        assert_eq!(
+            super::fixture_value_dtype(&FixtureValue::ScalarF64 { value: 1.0 }),
+            fj_core::DType::F64
+        );
+        assert_eq!(
+            super::fixture_value_dtype(&FixtureValue::ScalarI64 { value: 1 }),
+            fj_core::DType::I64
+        );
+        assert_eq!(
+            super::fixture_value_dtype(&FixtureValue::VectorF64 { values: vec![1.0] }),
+            fj_core::DType::F64
+        );
+        assert_eq!(
+            super::fixture_value_dtype(&FixtureValue::VectorI64 { values: vec![1] }),
+            fj_core::DType::I64
         );
     }
 }

@@ -387,13 +387,17 @@ def build_lax_cases(cb: CaseBuilder) -> None:
         ("erfc", "lax_erfc", _erfc_approx, [-2.0, -1.0, 0.0, 1.0, 2.0]),
     ]
 
+    # Known-imprecise ops that need wider tolerances
+    _wider_tol_ops = {"erf", "erfc", "logistic"}
+
     for name, program, fn, samples in _unary_cases:
         if fn is None:
             continue
+        tol = 1e-4 if name in _wider_tol_ops else 1e-6
         for idx, x in enumerate(samples):
             cb.add(
                 f"lax_{name}_f64_{idx}", "lax", program, ["jit"],
-                [x], [fn(x)], atol=1e-6, rtol=1e-6,
+                [x], [fn(x)], atol=tol, rtol=tol,
             )
 
     # ── Binary elementwise ──

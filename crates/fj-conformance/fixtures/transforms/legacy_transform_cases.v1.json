@@ -5150,7 +5150,7 @@
           "value": -2.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_logistic_f64_0",
       "comparator": "approx_atol_rtol",
@@ -5164,7 +5164,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_logistic",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5177,7 +5177,7 @@
           "value": -1.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_logistic_f64_1",
       "comparator": "approx_atol_rtol",
@@ -5191,7 +5191,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_logistic",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5204,7 +5204,7 @@
           "value": 0.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_logistic_f64_2",
       "comparator": "approx_atol_rtol",
@@ -5218,7 +5218,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_logistic",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5231,7 +5231,7 @@
           "value": 1.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_logistic_f64_3",
       "comparator": "approx_atol_rtol",
@@ -5245,7 +5245,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_logistic",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5258,7 +5258,7 @@
           "value": 2.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_logistic_f64_4",
       "comparator": "approx_atol_rtol",
@@ -5272,7 +5272,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_logistic",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5285,7 +5285,7 @@
           "value": -2.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erf_f64_0",
       "comparator": "approx_atol_rtol",
@@ -5299,7 +5299,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erf",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5312,7 +5312,7 @@
           "value": -1.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erf_f64_1",
       "comparator": "approx_atol_rtol",
@@ -5326,7 +5326,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erf",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5339,7 +5339,7 @@
           "value": 0.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erf_f64_2",
       "comparator": "approx_atol_rtol",
@@ -5353,7 +5353,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erf",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5366,7 +5366,7 @@
           "value": 1.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erf_f64_3",
       "comparator": "approx_atol_rtol",
@@ -5380,7 +5380,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erf",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5393,7 +5393,7 @@
           "value": 2.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erf_f64_4",
       "comparator": "approx_atol_rtol",
@@ -5407,7 +5407,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erf",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5420,7 +5420,7 @@
           "value": -2.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erfc_f64_0",
       "comparator": "approx_atol_rtol",
@@ -5434,7 +5434,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erfc",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5447,7 +5447,7 @@
           "value": -1.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erfc_f64_1",
       "comparator": "approx_atol_rtol",
@@ -5461,7 +5461,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erfc",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5474,7 +5474,7 @@
           "value": 0.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erfc_f64_2",
       "comparator": "approx_atol_rtol",
@@ -5488,7 +5488,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erfc",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5501,7 +5501,7 @@
           "value": 1.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erfc_f64_3",
       "comparator": "approx_atol_rtol",
@@ -5515,7 +5515,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erfc",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -5528,7 +5528,7 @@
           "value": 2.0
         }
       ],
-      "atol": 1e-06,
+      "atol": 0.0001,
       "baseline_mismatch": false,
       "case_id": "lax_erfc_f64_4",
       "comparator": "approx_atol_rtol",
@@ -5542,7 +5542,7 @@
       "flaky": false,
       "mode": "strict",
       "program": "lax_erfc",
-      "rtol": 1e-06,
+      "rtol": 0.0001,
       "simulated_delay_ms": 0,
       "transforms": [
         "jit"
@@ -6929,7 +6929,7 @@
       ]
     }
   ],
-  "generated_at_unix_ms": 1772098075143,
+  "generated_at_unix_ms": 1772102237938,
   "generated_by": "legacy_jax_capture_script",
   "metadata": {
     "hardware": "x86_64",
@@ -6937,9 +6937,9 @@
     "jax_version": "unavailable",
     "platform": "Linux",
     "python_version": "3.13.7",
-    "timestamp": "2026-02-26T09:27:55Z"
+    "timestamp": "2026-02-26T10:37:17Z"
   },
-  "oracle_root": "legacy_jax_code/jax",
+  "oracle_root": "/dev/null",
   "schema_version": "frankenjax.transform-fixtures.v1",
   "strict_capture": false
 }

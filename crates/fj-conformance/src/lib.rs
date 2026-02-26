@@ -263,6 +263,9 @@ pub enum FixtureProgram {
     LaxReduceMax,
     LaxReduceMin,
     LaxReduceProd,
+    // Utility programs
+    Identity,
+    AddOneMulTwo,
 }
 
 impl FixtureProgram {
@@ -320,6 +323,8 @@ impl FixtureProgram {
             Self::LaxReduceMax => ProgramSpec::LaxReduceMax,
             Self::LaxReduceMin => ProgramSpec::LaxReduceMin,
             Self::LaxReduceProd => ProgramSpec::LaxReduceProd,
+            Self::Identity => ProgramSpec::Identity,
+            Self::AddOneMulTwo => ProgramSpec::AddOneMulTwo,
         }
     }
 }

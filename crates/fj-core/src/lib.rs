@@ -984,6 +984,9 @@ pub enum ProgramSpec {
     LaxReduceMax,
     LaxReduceMin,
     LaxReduceProd,
+    // Utility programs for testing
+    Identity,
+    AddOneMulTwo,
 }
 
 #[must_use]
@@ -1104,6 +1107,29 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
         ProgramSpec::LaxReduceMax => unary_program(Primitive::ReduceMax),
         ProgramSpec::LaxReduceMin => unary_program(Primitive::ReduceMin),
         ProgramSpec::LaxReduceProd => unary_program(Primitive::ReduceProd),
+        // Utility programs
+        ProgramSpec::Identity => Jaxpr::new(vec![VarId(1)], vec![], vec![VarId(1)], vec![]),
+        ProgramSpec::AddOneMulTwo => Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2), VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+            ],
+        ),
     }
 }
 
@@ -2033,6 +2059,83 @@ mod tests {
                 );
                 Ok(Vec::new())
             },
+        );
+    }
+
+    #[test]
+    fn test_stack_axis0_rank2_to_rank3() {
+        // Stacking [2,3] matrices should produce a [N,2,3] rank-3 tensor
+        let mat_a = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                    Literal::I64(5),
+                    Literal::I64(6),
+                ],
+            )
+            .expect("matrix a should build"),
+        );
+        let mat_b = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(7),
+                    Literal::I64(8),
+                    Literal::I64(9),
+                    Literal::I64(10),
+                    Literal::I64(11),
+                    Literal::I64(12),
+                ],
+            )
+            .expect("matrix b should build"),
+        );
+        let stacked =
+            TensorValue::stack_axis0(&[mat_a, mat_b]).expect("stacking matrices should succeed");
+        assert_eq!(
+            stacked.shape,
+            Shape {
+                dims: vec![2, 2, 3]
+            },
+            "stacking two [2,3] matrices should produce [2,2,3]"
+        );
+        let elements: Vec<i64> = stacked
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        assert_eq!(elements, (1..=12).collect::<Vec<i64>>());
+    }
+
+    #[test]
+    fn test_stack_axis0_shape_mismatch_error() {
+        // Stacking tensors with different inner shapes should fail
+        let mat_a = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                (1..=6).map(Literal::I64).collect(),
+            )
+            .expect("matrix a should build"),
+        );
+        let mat_b = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![3, 2] },
+                (1..=6).map(Literal::I64).collect(),
+            )
+            .expect("matrix b should build"),
+        );
+        let err = TensorValue::stack_axis0(&[mat_a, mat_b])
+            .expect_err("stacking mismatched shapes should fail");
+        assert!(
+            matches!(err, ValueError::AxisStackShapeMismatch { .. }),
+            "should get shape mismatch error, got: {err}"
         );
     }
 

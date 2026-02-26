@@ -462,7 +462,37 @@ fn batch_binary_elementwise(
     inputs: &[BatchTracer],
     params: &BTreeMap<String, String>,
 ) -> Result<BatchTracer, BatchError> {
-    let (a_val, b_val, out_batch_dim) = harmonize_batch_dims(&inputs[0], &inputs[1])?;
+    let a = &inputs[0];
+    let b = &inputs[1];
+
+    // When one operand is a batched tensor and the other is an unbatched scalar,
+    // pass the scalar through directly — fj-lax eval_binary_elementwise handles
+    // (Tensor, Scalar) and (Scalar, Tensor) pairs natively with full broadcasting.
+    // This avoids the shape mismatch that occurs when broadcast_unbatched creates
+    // a [batch_size] tensor that doesn't match [batch_size, ...inner_dims].
+    match (a.batch_dim, b.batch_dim) {
+        (Some(bd), None) if matches!(b.value, Value::Scalar(_)) => {
+            let a_val = move_batch_dim_to_front(&a.value, bd)?;
+            let result = eval_primitive(primitive, &[a_val, b.value.clone()], params)
+                .map_err(|e| BatchError::EvalError(e.to_string()))?;
+            return Ok(BatchTracer {
+                value: result,
+                batch_dim: Some(0),
+            });
+        }
+        (None, Some(bd)) if matches!(a.value, Value::Scalar(_)) => {
+            let b_val = move_batch_dim_to_front(&b.value, bd)?;
+            let result = eval_primitive(primitive, &[a.value.clone(), b_val], params)
+                .map_err(|e| BatchError::EvalError(e.to_string()))?;
+            return Ok(BatchTracer {
+                value: result,
+                batch_dim: Some(0),
+            });
+        }
+        _ => {}
+    }
+
+    let (a_val, b_val, out_batch_dim) = harmonize_batch_dims(a, b)?;
     let result = eval_primitive(primitive, &[a_val, b_val], params)
         .map_err(|e| BatchError::EvalError(e.to_string()))?;
     Ok(BatchTracer {

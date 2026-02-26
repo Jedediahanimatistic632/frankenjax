@@ -114,7 +114,6 @@ pub enum TransformExecutionError {
     NonScalarGradientOutput,
     VmapRequiresRankOneLeadingArgument,
     VmapMismatchedLeadingDimension { expected: usize, actual: usize },
-    VmapNonScalarOutput,
     VmapInconsistentOutputArity { expected: usize, actual: usize },
     EmptyVmapOutput,
     TensorBuild(String),
@@ -140,12 +139,6 @@ impl std::fmt::Display for TransformExecutionError {
                     f,
                     "vmap leading-dimension mismatch: expected {}, got {}",
                     expected, actual
-                )
-            }
-            Self::VmapNonScalarOutput => {
-                write!(
-                    f,
-                    "vmap inner function must currently return scalar outputs"
                 )
             }
             Self::VmapInconsistentOutputArity { expected, actual } => {
@@ -1265,5 +1258,253 @@ mod tests {
         assert!(vals[0].abs() < 1e-10, "sin(0) should be 0");
         assert!((vals[1] - 1.0).abs() < 1e-10, "sin(pi/2) should be 1");
         assert!(vals[2].abs() < 1e-10, "sin(pi) should be ~0");
+    }
+
+    // ── VMAP tensor output tests (bd-22lm) ───────────────────────
+
+    #[test]
+    fn test_vmap_tensor_output_rank1() {
+        // vmap(AddOne) over a [3, 4] matrix: inner function receives rank-1 vectors,
+        // returns rank-1 vectors, stacked back to [3, 4].
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![3, 4] },
+                (1..=12).map(fj_core::Literal::I64).collect(),
+            )
+            .expect("matrix should build"),
+        );
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap]),
+            args: vec![matrix],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap with tensor output should succeed");
+
+        let output = response.outputs[0]
+            .as_tensor()
+            .expect("output should be tensor");
+        assert_eq!(output.shape, Shape { dims: vec![3, 4] });
+        let vals: Vec<i64> = output
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        let expected: Vec<i64> = (2..=13).collect();
+        assert_eq!(vals, expected);
+    }
+
+    #[test]
+    fn test_vmap_tensor_output_rank2() {
+        // vmap(AddOne) over a [2, 3, 4] rank-3 tensor: inner receives rank-2 matrices,
+        // returns rank-2 matrices, stacked back to [2, 3, 4].
+        let tensor = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![2, 3, 4],
+                },
+                (0..24).map(fj_core::Literal::I64).collect(),
+            )
+            .expect("rank-3 tensor should build"),
+        );
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap]),
+            args: vec![tensor],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap with rank-2 inner output should succeed");
+
+        let output = response.outputs[0]
+            .as_tensor()
+            .expect("output should be tensor");
+        assert_eq!(
+            output.shape,
+            Shape {
+                dims: vec![2, 3, 4]
+            }
+        );
+        let vals: Vec<i64> = output
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        let expected: Vec<i64> = (1..=24).collect();
+        assert_eq!(vals, expected);
+    }
+
+    #[test]
+    fn test_vmap_multi_output() {
+        // vmap(AddOneMulTwo) over [1, 2, 3]: inner returns (x+1, x*2) per element.
+        // Output: two tensors, each of shape [3].
+        let input = Value::vector_i64(&[1, 2, 3]).expect("vector should build");
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOneMulTwo, &[Transform::Vmap]),
+            args: vec![input],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap multi-output should succeed");
+
+        assert_eq!(response.outputs.len(), 2, "should have two outputs");
+
+        let out0 = response.outputs[0]
+            .as_tensor()
+            .expect("first output should be tensor");
+        let out1 = response.outputs[1]
+            .as_tensor()
+            .expect("second output should be tensor");
+
+        let vals0: Vec<i64> = out0.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        let vals1: Vec<i64> = out1.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+
+        assert_eq!(vals0, vec![2, 3, 4], "x+1 for [1,2,3]");
+        assert_eq!(vals1, vec![2, 4, 6], "x*2 for [1,2,3]");
+    }
+
+    #[test]
+    fn test_vmap_multi_output_loop_and_stack() {
+        // Same as above but force the loop-and-stack path by adding a Jit tail transform.
+        let input = Value::vector_i64(&[10, 20, 30]).expect("vector should build");
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(
+                ProgramSpec::AddOneMulTwo,
+                &[Transform::Vmap, Transform::Jit],
+            ),
+            args: vec![input],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap multi-output loop-and-stack should succeed");
+
+        assert_eq!(response.outputs.len(), 2, "should have two outputs");
+
+        let vals0: Vec<i64> = response.outputs[0]
+            .as_tensor()
+            .expect("first output tensor")
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        let vals1: Vec<i64> = response.outputs[1]
+            .as_tensor()
+            .expect("second output tensor")
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+
+        assert_eq!(vals0, vec![11, 21, 31], "x+1 for [10,20,30]");
+        assert_eq!(vals1, vec![20, 40, 60], "x*2 for [10,20,30]");
+    }
+
+    #[test]
+    fn test_vmap_output_shape_batch_prepend() {
+        // Verify batch dimension is correctly prepended to inner output shape.
+        // vmap(AddOne) on [5, 3] matrix: inner returns [3] vectors → stacked to [5, 3].
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![5, 3] },
+                (0..15)
+                    .map(|i| fj_core::Literal::from_f64(i as f64))
+                    .collect(),
+            )
+            .expect("matrix should build"),
+        );
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap]),
+            args: vec![matrix],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap shape prepend should succeed");
+
+        let output = response.outputs[0]
+            .as_tensor()
+            .expect("output should be tensor");
+        // Output shape should be [5, 3] = [batch_size, ...inner_output_shape]
+        assert_eq!(
+            output.shape,
+            Shape { dims: vec![5, 3] },
+            "batch dim (5) prepended to inner output shape (3)"
+        );
+    }
+
+    #[test]
+    fn test_vmap_identity_preserves_shape() {
+        // vmap(identity) should return the same tensor as the input.
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![3, 4] },
+                (1..=12).map(fj_core::Literal::I64).collect(),
+            )
+            .expect("matrix should build"),
+        );
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Identity, &[Transform::Vmap]),
+            args: vec![matrix.clone()],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap(identity) should succeed");
+
+        assert_eq!(response.outputs.len(), 1);
+        let output = &response.outputs[0];
+        let out_tensor = output.as_tensor().expect("output should be tensor");
+        let in_tensor = matrix.as_tensor().unwrap();
+        assert_eq!(
+            out_tensor.shape, in_tensor.shape,
+            "shape should be preserved"
+        );
+        assert_eq!(
+            out_tensor.elements, in_tensor.elements,
+            "elements should be identical"
+        );
+    }
+
+    #[test]
+    fn test_vmap_scalar_output_still_works() {
+        // Regression: existing scalar-output vmap behavior should be preserved.
+        let input = Value::vector_f64(&[1.0, 4.0, 9.0]).expect("vector should build");
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Square, &[Transform::Vmap]),
+            args: vec![input],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap(square) with scalar outputs should still work");
+
+        let output = response.outputs[0]
+            .as_tensor()
+            .expect("output should be stacked tensor");
+        let vals = output.to_f64_vec().expect("output should be f64");
+        assert!((vals[0] - 1.0).abs() < 1e-10, "1^2 = 1");
+        assert!((vals[1] - 16.0).abs() < 1e-10, "4^2 = 16");
+        assert!((vals[2] - 81.0).abs() < 1e-10, "9^2 = 81");
     }
 }

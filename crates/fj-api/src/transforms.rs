@@ -26,6 +26,8 @@ pub struct VmapWrapped {
     jaxpr: Jaxpr,
     backend: String,
     mode: CompatibilityMode,
+    in_axes: Option<String>,
+    out_axes: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +69,8 @@ pub fn vmap(jaxpr: Jaxpr) -> VmapWrapped {
         jaxpr,
         backend: "cpu".to_owned(),
         mode: CompatibilityMode::Strict,
+        in_axes: None,
+        out_axes: None,
     }
 }
 
@@ -200,14 +204,43 @@ impl VmapWrapped {
         self
     }
 
+    /// Set in_axes: comma-separated axis specs, e.g. "0,none,1".
+    /// - Integer: batch along that axis
+    /// - "none": this input is not batched (broadcast)
+    #[must_use]
+    pub fn with_in_axes(mut self, in_axes: &str) -> Self {
+        self.in_axes = Some(in_axes.to_owned());
+        self
+    }
+
+    /// Set out_axes: comma-separated axis specs for output batch dim placement.
+    /// - Integer: place batch dim at that axis position
+    /// - "none": output is not batched
+    #[must_use]
+    pub fn with_out_axes(mut self, out_axes: &str) -> Self {
+        self.out_axes = Some(out_axes.to_owned());
+        self
+    }
+
     pub fn call(&self, args: Vec<Value>) -> Result<Vec<Value>, ApiError> {
-        dispatch_with(
-            self.jaxpr.clone(),
-            &[Transform::Vmap],
+        let mut compile_options = BTreeMap::new();
+        if let Some(ref in_axes) = self.in_axes {
+            compile_options.insert("vmap_in_axes".to_owned(), in_axes.clone());
+        }
+        if let Some(ref out_axes) = self.out_axes {
+            compile_options.insert("vmap_out_axes".to_owned(), out_axes.clone());
+        }
+
+        let response = dispatch(DispatchRequest {
+            mode: self.mode,
+            ledger: build_ledger(self.jaxpr.clone(), &[Transform::Vmap]),
             args,
-            &self.backend,
-            self.mode,
-        )
+            backend: self.backend.clone(),
+            compile_options,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })?;
+        Ok(response.outputs)
     }
 
     /// Compose: `vmap(grad(f))`.

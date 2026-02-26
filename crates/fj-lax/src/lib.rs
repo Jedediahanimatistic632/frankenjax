@@ -43,6 +43,14 @@ pub enum EvalError {
         detail: String,
     },
     InvalidTensor(ValueError),
+    MaxIterationsExceeded {
+        primitive: Primitive,
+        max_iterations: usize,
+    },
+    ShapeChanged {
+        primitive: Primitive,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for EvalError {
@@ -81,6 +89,25 @@ impl std::fmt::Display for EvalError {
                 write!(f, "unsupported {} behavior: {}", primitive.as_str(), detail)
             }
             Self::InvalidTensor(err) => write!(f, "invalid tensor: {err}"),
+            Self::MaxIterationsExceeded {
+                primitive,
+                max_iterations,
+            } => {
+                write!(
+                    f,
+                    "{} exceeded max iterations ({})",
+                    primitive.as_str(),
+                    max_iterations
+                )
+            }
+            Self::ShapeChanged { primitive, detail } => {
+                write!(
+                    f,
+                    "{} body changed carry shape: {}",
+                    primitive.as_str(),
+                    detail
+                )
+            }
         }
     }
 }
@@ -427,18 +454,20 @@ fn eval_scan(
 /// Evaluate While: iterate a body operation on carry while a condition holds.
 ///
 /// inputs: [init_carry, step_value, threshold]
-///   - init_carry: initial carry value (scalar)
+///   - init_carry: initial carry value (scalar or tensor)
 ///   - step_value: value applied via body_op each iteration
 ///   - threshold: value compared against via cond_op
 ///
 /// params:
-///   - "body_op": the primitive to apply per iteration, e.g. "add", "mul"
+///   - "body_op": the primitive to apply per iteration, e.g. "add", "mul", "div", "pow"
 ///     The body computes: new_carry = body_op(carry, step_value)
-///   - "cond_op": comparison primitive, e.g. "lt", "le", "gt", "ge"
+///   - "cond_op": comparison primitive, e.g. "lt", "le", "gt", "ge", "ne", "eq"
 ///     Loop continues while: cond_op(carry, threshold) is true
 ///   - "max_iter": safety limit on iterations (default: 1000)
 ///
 /// Returns the final carry value when the condition becomes false.
+/// Returns `MaxIterationsExceeded` if the limit is reached without the condition
+/// becoming false.
 fn eval_while_loop(
     primitive: Primitive,
     inputs: &[Value],
@@ -457,58 +486,169 @@ fn eval_while_loop(
     let threshold = &inputs[2];
 
     let body_op_name = params.get("body_op").map(|s| s.as_str()).unwrap_or("add");
-    let body_op = match body_op_name {
-        "add" => Primitive::Add,
-        "sub" => Primitive::Sub,
-        "mul" => Primitive::Mul,
-        other => {
-            return Err(EvalError::Unsupported {
-                primitive,
-                detail: format!("unsupported while body_op: {other}"),
-            });
-        }
-    };
+    let body_op = parse_while_body_op(primitive, body_op_name)?;
 
     let cond_op_name = params.get("cond_op").map(|s| s.as_str()).unwrap_or("lt");
-    let cond_op = match cond_op_name {
-        "lt" => Primitive::Lt,
-        "le" => Primitive::Le,
-        "gt" => Primitive::Gt,
-        "ge" => Primitive::Ge,
-        other => {
-            return Err(EvalError::Unsupported {
-                primitive,
-                detail: format!("unsupported while cond_op: {other}"),
-            });
-        }
-    };
+    let cond_op = parse_while_cond_op(primitive, cond_op_name)?;
 
     let max_iter: usize = params
         .get("max_iter")
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000);
 
-    let mut carry = init_carry.clone();
+    let init_shape = value_shape_fingerprint(init_carry);
 
-    for _ in 0..max_iter {
-        // Check condition: cond_op(carry, threshold)
+    let cond_fn = |carry: &Value| -> Result<bool, EvalError> {
         let cond_result = eval_primitive(
             cond_op,
             &[carry.clone(), threshold.clone()],
             &BTreeMap::new(),
         )?;
-        let continue_loop = match &cond_result {
-            Value::Scalar(fj_core::Literal::Bool(b)) => *b,
-            Value::Scalar(fj_core::Literal::I64(v)) => *v != 0,
-            _ => false,
-        };
-        if !continue_loop {
-            break;
-        }
-        carry = eval_primitive(body_op, &[carry, step_value.clone()], &BTreeMap::new())?;
-    }
+        Ok(value_to_bool(&cond_result))
+    };
 
-    Ok(carry)
+    let body_fn = |carry: Value| -> Result<Value, EvalError> {
+        eval_primitive(body_op, &[carry, step_value.clone()], &BTreeMap::new())
+    };
+
+    eval_while_loop_core(primitive, init_carry.clone(), &init_shape, max_iter, cond_fn, body_fn)
+}
+
+/// Evaluate a while loop with arbitrary condition and body functions.
+///
+/// This is the core implementation used by both the param-based `eval_while_loop`
+/// and can be called directly by higher-level evaluators (e.g., fj-dispatch)
+/// that provide sub_jaxpr-based condition and body functions.
+pub fn eval_while_loop_functional<C, B>(
+    init_carry: Vec<Value>,
+    max_iterations: usize,
+    mut cond_fn: C,
+    mut body_fn: B,
+) -> Result<Vec<Value>, EvalError>
+where
+    C: FnMut(&[Value]) -> Result<bool, EvalError>,
+    B: FnMut(Vec<Value>) -> Result<Vec<Value>, EvalError>,
+{
+    let init_shapes: Vec<String> = init_carry.iter().map(value_shape_fingerprint).collect();
+    let mut carry = init_carry;
+
+    for _ in 0..max_iterations {
+        if !cond_fn(&carry)? {
+            return Ok(carry);
+        }
+        carry = body_fn(carry)?;
+        // Verify carry shape is preserved
+        for (i, (new_shape, orig_shape)) in carry
+            .iter()
+            .map(value_shape_fingerprint)
+            .zip(init_shapes.iter())
+            .enumerate()
+        {
+            if new_shape != *orig_shape {
+                return Err(EvalError::ShapeChanged {
+                    primitive: Primitive::While,
+                    detail: format!(
+                        "carry element {i} changed shape from {orig_shape} to {new_shape}"
+                    ),
+                });
+            }
+        }
+    }
+    Err(EvalError::MaxIterationsExceeded {
+        primitive: Primitive::While,
+        max_iterations,
+    })
+}
+
+/// Internal while_loop core that handles single-value carry.
+fn eval_while_loop_core<C, B>(
+    primitive: Primitive,
+    init: Value,
+    init_shape: &str,
+    max_iter: usize,
+    mut cond_fn: C,
+    mut body_fn: B,
+) -> Result<Value, EvalError>
+where
+    C: FnMut(&Value) -> Result<bool, EvalError>,
+    B: FnMut(Value) -> Result<Value, EvalError>,
+{
+    let mut carry = init;
+
+    for _ in 0..max_iter {
+        if !cond_fn(&carry)? {
+            return Ok(carry);
+        }
+        carry = body_fn(carry)?;
+        // Verify shape preservation
+        let new_shape = value_shape_fingerprint(&carry);
+        if new_shape != init_shape {
+            return Err(EvalError::ShapeChanged {
+                primitive,
+                detail: format!("carry changed from {init_shape} to {new_shape}"),
+            });
+        }
+    }
+    Err(EvalError::MaxIterationsExceeded {
+        primitive,
+        max_iterations: max_iter,
+    })
+}
+
+fn parse_while_body_op(primitive: Primitive, name: &str) -> Result<Primitive, EvalError> {
+    match name {
+        "add" => Ok(Primitive::Add),
+        "sub" => Ok(Primitive::Sub),
+        "mul" => Ok(Primitive::Mul),
+        "div" => Ok(Primitive::Div),
+        "pow" => Ok(Primitive::Pow),
+        other => Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("unsupported while body_op: {other}"),
+        }),
+    }
+}
+
+fn parse_while_cond_op(primitive: Primitive, name: &str) -> Result<Primitive, EvalError> {
+    match name {
+        "lt" => Ok(Primitive::Lt),
+        "le" => Ok(Primitive::Le),
+        "gt" => Ok(Primitive::Gt),
+        "ge" => Ok(Primitive::Ge),
+        "ne" => Ok(Primitive::Ne),
+        "eq" => Ok(Primitive::Eq),
+        other => Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("unsupported while cond_op: {other}"),
+        }),
+    }
+}
+
+/// Extract a boolean-ish value from a comparison result.
+fn value_to_bool(v: &Value) -> bool {
+    match v {
+        Value::Scalar(fj_core::Literal::Bool(b)) => *b,
+        Value::Scalar(fj_core::Literal::I64(v)) => *v != 0,
+        Value::Scalar(fj_core::Literal::F64Bits(bits)) => f64::from_bits(*bits) != 0.0,
+        _ => false,
+    }
+}
+
+/// Compute a simple shape fingerprint for shape-preservation checks.
+fn value_shape_fingerprint(v: &Value) -> String {
+    match v {
+        Value::Scalar(lit) => {
+            let kind = match lit {
+                fj_core::Literal::I64(_) => "i64",
+                fj_core::Literal::Bool(_) => "bool",
+                fj_core::Literal::F64Bits(_) => "f64",
+                fj_core::Literal::Complex64Bits(_, _) => "c64",
+                fj_core::Literal::Complex128Bits(_, _) => "c128",
+            };
+            format!("scalar:{kind}")
+        }
+        Value::Tensor(t) => format!("tensor:{:?}:{:?}", t.dtype, t.shape.dims),
+    }
 }
 
 /// Evaluate a binary bitwise operation on integer values.
@@ -3741,6 +3881,12 @@ mod tests {
         p
     }
 
+    fn while_params_max(body_op: &str, cond_op: &str, max: usize) -> BTreeMap<String, String> {
+        let mut p = while_params(body_op, cond_op);
+        p.insert("max_iter".to_owned(), max.to_string());
+        p
+    }
+
     #[test]
     fn while_add_until_ge_threshold() {
         // while carry < 10: carry += 3 => 0, 3, 6, 9, 12 => stops at 12
@@ -3809,6 +3955,181 @@ mod tests {
             &while_params("add", "lt"),
         );
         assert!(result.is_err());
+    }
+
+    // ── New while_loop tests (bd-2807) ─────────────────────────────
+
+    #[test]
+    fn test_while_loop_countdown() {
+        // while_loop(|x| x > 0, |x| x - 1, init=10) → 0
+        let init = Value::scalar_f64(10.0);
+        let step = Value::scalar_f64(1.0);
+        let threshold = Value::scalar_f64(0.0);
+        let out = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params("sub", "gt"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_while_loop_convergence() {
+        // Newton's method for sqrt(2): x_{n+1} = (x + 2/x) / 2
+        // We approximate by iterating: carry = (carry + 2/carry) / 2
+        // Using the functional API
+        let init = vec![Value::scalar_f64(2.0)];
+        let result = super::eval_while_loop_functional(
+            init,
+            100,
+            |carry| {
+                let x = carry[0].as_f64_scalar().unwrap();
+                // Continue while |x² - 2| > 1e-10
+                Ok((x * x - 2.0).abs() > 1e-10)
+            },
+            |carry| {
+                let x = carry[0].as_f64_scalar().unwrap();
+                let new_x = (x + 2.0 / x) / 2.0;
+                Ok(vec![Value::scalar_f64(new_x)])
+            },
+        )
+        .unwrap();
+        let sqrt2 = result[0].as_f64_scalar().unwrap();
+        assert!(
+            (sqrt2 - std::f64::consts::SQRT_2).abs() < 1e-10,
+            "Newton's method should converge to sqrt(2), got {sqrt2}"
+        );
+    }
+
+    #[test]
+    fn test_while_loop_zero_iterations() {
+        // Condition false initially → returns init unchanged
+        let init = Value::scalar_f64(42.0);
+        let step = Value::scalar_f64(1.0);
+        let threshold = Value::scalar_f64(100.0);
+        // carry > 100 is false for carry=42
+        let out = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params("add", "gt"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 42.0);
+    }
+
+    #[test]
+    fn test_while_loop_single_iteration() {
+        // Condition true once, then false
+        // carry=5, while carry < 6: carry += 1 → 6, then 6 < 6 is false
+        let init = Value::scalar_f64(5.0);
+        let step = Value::scalar_f64(1.0);
+        let threshold = Value::scalar_f64(6.0);
+        let out = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params("add", "lt"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 6.0);
+    }
+
+    #[test]
+    fn test_while_loop_max_iterations() {
+        // Loop that would never terminate, but max_iter caps it
+        let init = Value::scalar_f64(0.0);
+        let step = Value::scalar_f64(0.0); // Adding zero never changes carry
+        let threshold = Value::scalar_f64(10.0);
+        let result = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params_max("add", "lt", 5),
+        );
+        match result {
+            Err(super::EvalError::MaxIterationsExceeded {
+                max_iterations, ..
+            }) => {
+                assert_eq!(max_iterations, 5);
+            }
+            other => panic!("expected MaxIterationsExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_while_loop_functional_tuple_carry() {
+        // Carry state is (i, accumulator): count from 0 to 5, accumulating squares
+        let init = vec![Value::scalar_f64(0.0), Value::scalar_f64(0.0)];
+        let result = super::eval_while_loop_functional(
+            init,
+            100,
+            |carry| {
+                let i = carry[0].as_f64_scalar().unwrap();
+                Ok(i < 5.0)
+            },
+            |carry| {
+                let i = carry[0].as_f64_scalar().unwrap();
+                let acc = carry[1].as_f64_scalar().unwrap();
+                Ok(vec![
+                    Value::scalar_f64(i + 1.0),
+                    Value::scalar_f64(acc + i * i),
+                ])
+            },
+        )
+        .unwrap();
+        let final_i = result[0].as_f64_scalar().unwrap();
+        let final_acc = result[1].as_f64_scalar().unwrap();
+        assert_eq!(final_i, 5.0);
+        // 0² + 1² + 2² + 3² + 4² = 30
+        assert_eq!(final_acc, 30.0);
+    }
+
+    #[test]
+    fn test_while_loop_functional_shape_mismatch() {
+        // Body changes carry shape → error
+        let init = vec![Value::scalar_f64(0.0)];
+        let result = super::eval_while_loop_functional(
+            init,
+            100,
+            |_carry| Ok(true),
+            |_carry| {
+                // Return a vector instead of scalar
+                Ok(vec![Value::vector_f64(&[1.0, 2.0]).unwrap()])
+            },
+        );
+        match result {
+            Err(super::EvalError::ShapeChanged { .. }) => {}
+            other => panic!("expected ShapeChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_while_loop_div_body_op() {
+        // while carry > 1: carry /= 2 → 16, 8, 4, 2, 1 → stops at 1
+        let init = Value::scalar_f64(16.0);
+        let step = Value::scalar_f64(2.0);
+        let threshold = Value::scalar_f64(1.0);
+        let out = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params("div", "gt"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_while_loop_ne_cond() {
+        // while carry != 10: carry += 2 → 0, 2, 4, 6, 8, 10 → stops at 10
+        let init = Value::scalar_f64(0.0);
+        let step = Value::scalar_f64(2.0);
+        let threshold = Value::scalar_f64(10.0);
+        let out = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params("add", "ne"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 10.0);
     }
 
     // ── Bitwise tests ───────────────────────────────────────────────

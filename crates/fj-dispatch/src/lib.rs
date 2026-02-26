@@ -89,6 +89,51 @@ impl Default for EffectContext {
     }
 }
 
+/// Specifies which axis of an input/output is the batch axis for vmap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisSpec {
+    /// This input/output is batched along the given axis.
+    Batched(i32),
+    /// This input/output is not batched (broadcast to all batch elements).
+    NotBatched,
+}
+
+impl AxisSpec {
+    /// Resolve negative axis index to a positive one, given the tensor rank.
+    fn resolve(self, rank: usize) -> Option<usize> {
+        match self {
+            Self::NotBatched => None,
+            Self::Batched(axis) => {
+                if axis >= 0 {
+                    Some(axis as usize)
+                } else {
+                    let resolved = rank as i32 + axis;
+                    if resolved >= 0 {
+                        Some(resolved as usize)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Specifies in_axes/out_axes for vmap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VmapAxes {
+    /// Same axis for all inputs/outputs.
+    Uniform(AxisSpec),
+    /// Per-input/output axis specification.
+    PerArg(Vec<AxisSpec>),
+}
+
+impl Default for VmapAxes {
+    fn default() -> Self {
+        Self::Uniform(AxisSpec::Batched(0))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchRequest {
     pub mode: CompatibilityMode,
@@ -98,6 +143,66 @@ pub struct DispatchRequest {
     pub compile_options: BTreeMap<String, String>,
     pub custom_hook: Option<String>,
     pub unknown_incompatible_features: Vec<String>,
+}
+
+/// Parse in_axes from compile_options.
+/// Format: comma-separated list of axis specs, e.g. "0,none,1" or just "0" for uniform.
+fn parse_vmap_in_axes(opts: &BTreeMap<String, String>, num_args: usize) -> Vec<AxisSpec> {
+    match opts.get("vmap_in_axes") {
+        None => vec![AxisSpec::Batched(0); num_args],
+        Some(s) if s.trim().is_empty() => vec![AxisSpec::Batched(0); num_args],
+        Some(s) => {
+            let specs: Vec<AxisSpec> = s
+                .split(',')
+                .map(|part| {
+                    let trimmed = part.trim();
+                    if trimmed.eq_ignore_ascii_case("none") {
+                        AxisSpec::NotBatched
+                    } else {
+                        trimmed
+                            .parse::<i32>()
+                            .map(AxisSpec::Batched)
+                            .unwrap_or(AxisSpec::Batched(0))
+                    }
+                })
+                .collect();
+            // If only one spec provided, broadcast to all args
+            if specs.len() == 1 {
+                vec![specs[0]; num_args]
+            } else {
+                specs
+            }
+        }
+    }
+}
+
+/// Parse out_axes from compile_options.
+fn parse_vmap_out_axes(opts: &BTreeMap<String, String>, num_outputs: usize) -> Vec<AxisSpec> {
+    match opts.get("vmap_out_axes") {
+        None => vec![AxisSpec::Batched(0); num_outputs],
+        Some(s) if s.trim().is_empty() => vec![AxisSpec::Batched(0); num_outputs],
+        Some(s) => {
+            let specs: Vec<AxisSpec> = s
+                .split(',')
+                .map(|part| {
+                    let trimmed = part.trim();
+                    if trimmed.eq_ignore_ascii_case("none") {
+                        AxisSpec::NotBatched
+                    } else {
+                        trimmed
+                            .parse::<i32>()
+                            .map(AxisSpec::Batched)
+                            .unwrap_or(AxisSpec::Batched(0))
+                    }
+                })
+                .collect();
+            if specs.len() == 1 {
+                vec![specs[0]; num_outputs]
+            } else {
+                specs
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +220,8 @@ pub enum TransformExecutionError {
     VmapRequiresRankOneLeadingArgument,
     VmapMismatchedLeadingDimension { expected: usize, actual: usize },
     VmapInconsistentOutputArity { expected: usize, actual: usize },
+    VmapAxesOutOfBounds { axis: i32, ndim: usize },
+    VmapAxesCountMismatch { expected: usize, actual: usize },
     EmptyVmapOutput,
     TensorBuild(String),
 }
@@ -150,6 +257,18 @@ impl std::fmt::Display for TransformExecutionError {
             }
             Self::EmptyVmapOutput => {
                 write!(f, "vmap received no mapped elements")
+            }
+            Self::VmapAxesOutOfBounds { axis, ndim } => {
+                write!(
+                    f,
+                    "vmap axis {axis} is out of bounds for tensor with {ndim} dimensions"
+                )
+            }
+            Self::VmapAxesCountMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "vmap in_axes/out_axes length mismatch: expected {expected}, got {actual}"
+                )
             }
             Self::TensorBuild(detail) => write!(f, "tensor build error: {detail}"),
         }
@@ -240,6 +359,7 @@ pub fn dispatch(request: DispatchRequest) -> Result<DispatchResponse, DispatchEr
         &request.args,
         backend,
         device,
+        &request.compile_options,
     )?;
 
     let effect_tokens = effect_ctx.finalize();
@@ -290,6 +410,7 @@ fn execute_with_transforms(
     args: &[Value],
     backend: &dyn Backend,
     device: DeviceId,
+    compile_options: &BTreeMap<String, String>,
 ) -> Result<Vec<Value>, DispatchError> {
     // Skip leading Jit transforms (no-op pass-through) to find the first
     // non-Jit transform, avoiding recursive stack frames for Jit chains.
@@ -308,7 +429,9 @@ fn execute_with_transforms(
     match head {
         Transform::Jit => unreachable!("Jit transforms were skipped above"),
         Transform::Grad => execute_grad(root_jaxpr, tail, args, backend, device),
-        Transform::Vmap => execute_vmap(root_jaxpr, tail, args, backend, device),
+        Transform::Vmap => {
+            execute_vmap(root_jaxpr, tail, args, backend, device, compile_options)
+        }
     }
 }
 
@@ -364,8 +487,11 @@ fn execute_grad_finite_diff(
     plus_args[0] = Value::scalar_f64(input_value + epsilon);
     minus_args[0] = Value::scalar_f64(input_value - epsilon);
 
-    let plus_out = execute_with_transforms(root_jaxpr, tail, &plus_args, backend, device)?;
-    let minus_out = execute_with_transforms(root_jaxpr, tail, &minus_args, backend, device)?;
+    let empty_opts = BTreeMap::new();
+    let plus_out =
+        execute_with_transforms(root_jaxpr, tail, &plus_args, backend, device, &empty_opts)?;
+    let minus_out =
+        execute_with_transforms(root_jaxpr, tail, &minus_args, backend, device, &empty_opts)?;
 
     let plus_value = plus_out
         .first()
@@ -386,6 +512,7 @@ fn execute_vmap(
     args: &[Value],
     backend: &dyn Backend,
     device: DeviceId,
+    compile_options: &BTreeMap<String, String>,
 ) -> Result<Vec<Value>, DispatchError> {
     if args.is_empty() {
         return Err(TransformExecutionError::EmptyArgumentList {
@@ -394,68 +521,114 @@ fn execute_vmap(
         .into());
     }
 
-    // Validate inputs: at least the first arg must be a tensor with rank >= 1
-    let lead_tensor = args[0]
-        .as_tensor()
-        .ok_or(TransformExecutionError::VmapRequiresRankOneLeadingArgument)?;
-    if lead_tensor.rank() == 0 {
-        return Err(TransformExecutionError::VmapRequiresRankOneLeadingArgument.into());
+    // Parse in_axes from compile_options
+    let in_axes = parse_vmap_in_axes(compile_options, args.len());
+
+    // Validate in_axes length matches args
+    if in_axes.len() != args.len() {
+        return Err(TransformExecutionError::VmapAxesCountMismatch {
+            expected: args.len(),
+            actual: in_axes.len(),
+        }
+        .into());
     }
 
-    let lead_len = lead_tensor
-        .leading_dim()
-        .ok_or(TransformExecutionError::VmapRequiresRankOneLeadingArgument)?
-        as usize;
-    if lead_len == 0 {
-        return Err(TransformExecutionError::EmptyVmapOutput.into());
-    }
-
-    // Validate all tensor args have matching leading dimension
-    for arg in &args[1..] {
-        if let Value::Tensor(tensor) = arg {
-            if tensor.rank() == 0 {
-                return Err(TransformExecutionError::VmapRequiresRankOneLeadingArgument.into());
-            }
-            let arg_lead = tensor
-                .leading_dim()
-                .ok_or(TransformExecutionError::VmapRequiresRankOneLeadingArgument)?
-                as usize;
-            if arg_lead != lead_len {
-                return Err(TransformExecutionError::VmapMismatchedLeadingDimension {
-                    expected: lead_len,
-                    actual: arg_lead,
+    // Determine batch size from the first batched argument
+    let mut batch_size: Option<usize> = None;
+    for (arg, axis_spec) in args.iter().zip(in_axes.iter()) {
+        if let AxisSpec::Batched(axis) = axis_spec {
+            match arg {
+                Value::Tensor(tensor) => {
+                    let rank = tensor.rank();
+                    let resolved = axis_spec
+                        .resolve(rank)
+                        .ok_or(TransformExecutionError::VmapAxesOutOfBounds {
+                            axis: *axis,
+                            ndim: rank,
+                        })?;
+                    if resolved >= rank {
+                        return Err(TransformExecutionError::VmapAxesOutOfBounds {
+                            axis: *axis,
+                            ndim: rank,
+                        }
+                        .into());
+                    }
+                    let dim_size = tensor.shape.dims[resolved] as usize;
+                    if let Some(expected) = batch_size {
+                        if dim_size != expected {
+                            return Err(
+                                TransformExecutionError::VmapMismatchedLeadingDimension {
+                                    expected,
+                                    actual: dim_size,
+                                }
+                                .into(),
+                            );
+                        }
+                    } else {
+                        batch_size = Some(dim_size);
+                    }
                 }
-                .into());
+                Value::Scalar(_) => {
+                    // Scalar with batched axis is invalid
+                    return Err(
+                        TransformExecutionError::VmapRequiresRankOneLeadingArgument.into()
+                    );
+                }
             }
         }
     }
 
-    // Use BatchTrace interpreter when no tail transforms exist.
-    // This gives O(1) vectorized execution for the innermost vmap.
-    if tail.is_empty() {
-        return execute_vmap_batch_trace(root_jaxpr, args);
+    let lead_len = batch_size.ok_or(TransformExecutionError::EmptyVmapOutput)?;
+    if lead_len == 0 {
+        return Err(TransformExecutionError::EmptyVmapOutput.into());
     }
 
-    // When there are tail transforms (e.g., vmap(grad(f))), fall back to
-    // loop-and-stack since BatchTrace operates at the Jaxpr primitive level
-    // and cannot handle composed transforms within the trace.
-    execute_vmap_loop_and_stack(root_jaxpr, tail, args, backend, device, lead_len)
+    // Use BatchTrace interpreter when no tail transforms exist and all batched
+    // args use axis 0 (the default case).
+    let all_axis_zero = in_axes.iter().all(|spec| matches!(spec, AxisSpec::Batched(0) | AxisSpec::NotBatched));
+    if tail.is_empty() && all_axis_zero && !compile_options.contains_key("vmap_out_axes") {
+        return execute_vmap_batch_trace(root_jaxpr, args, &in_axes);
+    }
+
+    // Fall back to loop-and-stack for non-trivial axes or composed transforms
+    execute_vmap_loop_and_stack(
+        root_jaxpr,
+        tail,
+        args,
+        backend,
+        device,
+        lead_len,
+        &in_axes,
+        compile_options,
+    )
 }
 
 /// BatchTrace-based vmap execution: O(1) vectorized dispatch via per-primitive
-/// batching rules. Each arg becomes a BatchTracer with batch_dim=0 (tensors)
-/// or None (scalars), and the Jaxpr is evaluated equation-by-equation.
+/// batching rules. Each arg becomes a BatchTracer with the specified batch_dim
+/// or None (scalars/unbatched), and the Jaxpr is evaluated equation-by-equation.
 fn execute_vmap_batch_trace(
     root_jaxpr: &Jaxpr,
     args: &[Value],
+    in_axes: &[AxisSpec],
 ) -> Result<Vec<Value>, DispatchError> {
     use batching::{BatchTracer, batch_eval_jaxpr};
 
     let batch_inputs: Vec<BatchTracer> = args
         .iter()
-        .map(|arg| match arg {
-            Value::Scalar(_) => BatchTracer::unbatched(arg.clone()),
-            Value::Tensor(_) => BatchTracer::batched(arg.clone(), 0),
+        .zip(in_axes.iter())
+        .map(|(arg, axis_spec)| match axis_spec {
+            AxisSpec::NotBatched => BatchTracer::unbatched(arg.clone()),
+            AxisSpec::Batched(_) => {
+                let resolved = match arg {
+                    Value::Tensor(t) => axis_spec.resolve(t.rank()).unwrap_or(0),
+                    Value::Scalar(_) => 0,
+                };
+                if matches!(arg, Value::Scalar(_)) {
+                    BatchTracer::unbatched(arg.clone())
+                } else {
+                    BatchTracer::batched(arg.clone(), resolved)
+                }
+            }
         })
         .collect();
 
@@ -492,33 +665,49 @@ fn execute_vmap_loop_and_stack(
     backend: &dyn Backend,
     device: DeviceId,
     lead_len: usize,
+    in_axes: &[AxisSpec],
+    compile_options: &BTreeMap<String, String>,
 ) -> Result<Vec<Value>, DispatchError> {
-    let lead_tensor = args[0].as_tensor().unwrap();
     let mut per_output_values: Vec<Vec<Value>> = Vec::new();
 
     for index in 0..lead_len {
         let mut mapped_args = Vec::with_capacity(args.len());
-        mapped_args.push(
-            lead_tensor
-                .slice_axis0(index)
-                .map_err(|err| TransformExecutionError::TensorBuild(err.to_string()))?,
-        );
-
-        for arg in &args[1..] {
-            match arg {
-                Value::Scalar(lit) => mapped_args.push(Value::Scalar(*lit)),
-                Value::Tensor(tensor) => {
-                    mapped_args.push(
-                        tensor
-                            .slice_axis0(index)
-                            .map_err(|err| TransformExecutionError::TensorBuild(err.to_string()))?,
-                    );
+        for (arg, axis_spec) in args.iter().zip(in_axes.iter()) {
+            match axis_spec {
+                AxisSpec::NotBatched => {
+                    // Broadcast: pass the arg unchanged to every iteration
+                    mapped_args.push(arg.clone());
+                }
+                AxisSpec::Batched(_) => {
+                    match arg {
+                        Value::Scalar(lit) => mapped_args.push(Value::Scalar(*lit)),
+                        Value::Tensor(tensor) => {
+                            let resolved_axis = axis_spec.resolve(tensor.rank()).unwrap_or(0);
+                            if resolved_axis == 0 {
+                                mapped_args.push(
+                                    tensor
+                                        .slice_axis0(index)
+                                        .map_err(|err| {
+                                            TransformExecutionError::TensorBuild(err.to_string())
+                                        })?,
+                                );
+                            } else {
+                                // For non-zero axes, we need to slice along that axis
+                                let sliced = slice_along_axis(tensor, resolved_axis, index)
+                                    .map_err(|err| {
+                                        TransformExecutionError::TensorBuild(err.to_string())
+                                    })?;
+                                mapped_args.push(sliced);
+                            }
+                        }
+                    }
                 }
             }
         }
 
+        let empty_opts = BTreeMap::new();
         let mapped_output =
-            execute_with_transforms(root_jaxpr, tail, &mapped_args, backend, device)?;
+            execute_with_transforms(root_jaxpr, tail, &mapped_args, backend, device, &empty_opts)?;
         if index == 0 {
             per_output_values = vec![Vec::with_capacity(lead_len); mapped_output.len()];
         } else if mapped_output.len() != per_output_values.len() {
@@ -534,14 +723,94 @@ fn execute_vmap_loop_and_stack(
         }
     }
 
+    let out_axes = parse_vmap_out_axes(compile_options, per_output_values.len());
+
     let mut outputs = Vec::with_capacity(per_output_values.len());
-    for values in per_output_values {
-        let tensor = TensorValue::stack_axis0(&values)
+    for (out_idx, values) in per_output_values.iter().enumerate() {
+        let out_axis = out_axes.get(out_idx).copied().unwrap_or(AxisSpec::Batched(0));
+        let tensor = TensorValue::stack_axis0(values)
             .map_err(|err| TransformExecutionError::TensorBuild(err.to_string()))?;
-        outputs.push(Value::Tensor(tensor));
+        match out_axis {
+            AxisSpec::Batched(0) | AxisSpec::NotBatched => {
+                outputs.push(Value::Tensor(tensor));
+            }
+            AxisSpec::Batched(target_axis) => {
+                // Move batch dim from 0 to target_axis via Transpose primitive
+                let rank = tensor.rank();
+                let resolved = if target_axis < 0 {
+                    (rank as i32 + target_axis) as usize
+                } else {
+                    target_axis as usize
+                };
+                if resolved >= rank || resolved == 0 {
+                    outputs.push(Value::Tensor(tensor));
+                } else {
+                    // Build permutation: move axis 0 to position `resolved`
+                    let mut perm: Vec<usize> = (0..rank).collect();
+                    perm.remove(0);
+                    perm.insert(resolved, 0);
+                    let perm_str = perm
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let mut params = BTreeMap::new();
+                    params.insert("permutation".to_owned(), perm_str);
+                    let transposed = fj_lax::eval_primitive(
+                        fj_core::Primitive::Transpose,
+                        &[Value::Tensor(tensor)],
+                        &params,
+                    )
+                    .map_err(|err| TransformExecutionError::TensorBuild(err.to_string()))?;
+                    outputs.push(transposed);
+                }
+            }
+        }
     }
 
     Ok(outputs)
+}
+
+/// Slice a tensor along an arbitrary axis, extracting the `index`-th slice.
+fn slice_along_axis(
+    tensor: &TensorValue,
+    axis: usize,
+    index: usize,
+) -> Result<Value, String> {
+    let rank = tensor.rank();
+    if axis >= rank {
+        return Err(format!(
+            "slice_along_axis: axis {axis} out of bounds for rank {rank}"
+        ));
+    }
+    if axis == 0 {
+        return tensor.slice_axis0(index).map_err(|e| e.to_string());
+    }
+
+    // For non-zero axis, transpose to bring the axis to position 0,
+    // slice, then transpose back.
+    let mut perm_fwd: Vec<usize> = (0..rank).collect();
+    perm_fwd.remove(axis);
+    perm_fwd.insert(0, axis);
+    let perm_str = perm_fwd
+        .iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut params = BTreeMap::new();
+    params.insert("permutation".to_owned(), perm_str);
+
+    let transposed = fj_lax::eval_primitive(
+        fj_core::Primitive::Transpose,
+        &[Value::Tensor(tensor.clone())],
+        &params,
+    )
+    .map_err(|e| e.to_string())?;
+
+    match transposed {
+        Value::Tensor(t) => t.slice_axis0(index).map_err(|e| e.to_string()),
+        other => Ok(other),
+    }
 }
 
 #[inline]

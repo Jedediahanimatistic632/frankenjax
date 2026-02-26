@@ -604,6 +604,14 @@ pub struct ToleranceViolation {
     pub tolerance_used: f64,
 }
 
+/// Error distribution histogram bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistogramBucket {
+    pub lower_bound: f64,
+    pub upper_bound: f64,
+    pub count: usize,
+}
+
 /// Summary of tolerance violations for a fixture bundle run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToleranceReport {
@@ -611,6 +619,8 @@ pub struct ToleranceReport {
     pub violations: Vec<ToleranceViolation>,
     pub max_abs_error: f64,
     pub mean_abs_error: f64,
+    pub error_histogram: Vec<HistogramBucket>,
+    error_sum: f64,
 }
 
 impl ToleranceReport {
@@ -621,6 +631,8 @@ impl ToleranceReport {
             violations: Vec::new(),
             max_abs_error: 0.0,
             mean_abs_error: 0.0,
+            error_histogram: Vec::new(),
+            error_sum: 0.0,
         }
     }
 
@@ -636,6 +648,7 @@ impl ToleranceReport {
     ) {
         self.total_comparisons += 1;
         let abs_diff = (expected - actual).abs();
+        self.error_sum += abs_diff;
         if abs_diff > self.max_abs_error {
             self.max_abs_error = abs_diff;
         }
@@ -652,10 +665,50 @@ impl ToleranceReport {
         }
     }
 
-    /// Finalize the report by computing the mean absolute error.
+    /// Finalize the report: compute mean error and build histogram.
     pub fn finalize(&mut self, error_sum: f64) {
+        let total_sum = if error_sum > 0.0 {
+            error_sum
+        } else {
+            self.error_sum
+        };
         if self.total_comparisons > 0 {
-            self.mean_abs_error = error_sum / self.total_comparisons as f64;
+            self.mean_abs_error = total_sum / self.total_comparisons as f64;
+        }
+    }
+
+    /// Build the error distribution histogram from recorded violations
+    /// and all comparisons. Call after all `record()` calls are done.
+    pub fn build_histogram(&mut self) {
+        // Log-scale buckets: [0, 1e-15), [1e-15, 1e-12), [1e-12, 1e-9),
+        // [1e-9, 1e-6), [1e-6, 1e-3), [1e-3, 1e0), [1e0, inf)
+        let boundaries: &[(f64, f64)] = &[
+            (0.0, 1e-15),
+            (1e-15, 1e-12),
+            (1e-12, 1e-9),
+            (1e-9, 1e-6),
+            (1e-6, 1e-3),
+            (1e-3, 1.0),
+            (1.0, f64::INFINITY),
+        ];
+
+        self.error_histogram = boundaries
+            .iter()
+            .map(|&(lo, hi)| HistogramBucket {
+                lower_bound: lo,
+                upper_bound: hi,
+                count: 0,
+            })
+            .collect();
+
+        // Count violations into buckets
+        for v in &self.violations {
+            for bucket in &mut self.error_histogram {
+                if v.abs_diff >= bucket.lower_bound && v.abs_diff < bucket.upper_bound {
+                    bucket.count += 1;
+                    break;
+                }
+            }
         }
     }
 
@@ -1621,6 +1674,94 @@ mod tests {
             report.mismatched_cases, 0,
             "all fixtures should pass with tightened tolerances (got {} mismatches out of {})",
             report.mismatched_cases, report.total_cases
+        );
+    }
+
+    #[test]
+    fn test_tolerance_histogram() {
+        let mut report = super::ToleranceReport::new();
+        // Record violations at different magnitudes
+        report.record("small", 0, 0, 1.0, 1.0 + 1e-14, 0.0); // ~1e-14 error
+        report.record("medium", 0, 0, 1.0, 1.0 + 1e-7, 0.0); // ~1e-7 error
+        report.record("large", 0, 0, 1.0, 1.5, 0.0); // 0.5 error
+        report.build_histogram();
+
+        assert_eq!(
+            report.error_histogram.len(),
+            7,
+            "histogram should have 7 buckets"
+        );
+        // 1e-14 falls in [1e-15, 1e-12)
+        assert_eq!(
+            report.error_histogram[1].count, 1,
+            "1e-14 error should be in bucket [1e-15, 1e-12)"
+        );
+        // 1e-7 falls in [1e-9, 1e-6)
+        assert_eq!(
+            report.error_histogram[3].count, 1,
+            "1e-7 error should be in bucket [1e-9, 1e-6)"
+        );
+        // 0.5 falls in [1e-3, 1.0)
+        assert_eq!(
+            report.error_histogram[5].count, 1,
+            "0.5 error should be in bucket [1e-3, 1.0)"
+        );
+    }
+
+    #[test]
+    fn test_known_imprecise_ops_flagged() {
+        // erf/erfc fixtures should specify wider tolerance (1e-4) in the fixture itself
+        // When resolved against F64 defaults, the wider fixture tolerance wins
+        let tier = super::ToleranceTier::resolve(fj_core::DType::F64, 1e-4, 1e-4);
+        assert!(
+            tier.atol > 1e-6,
+            "erf/erfc should use wider tolerance than 1e-6, got {}",
+            tier.atol
+        );
+
+        // Standard F64 ops should use tight tolerance
+        let tight = super::ToleranceTier::resolve(fj_core::DType::F64, 0.0, 0.0);
+        assert!(
+            tight.atol <= 1e-12,
+            "standard F64 should use tight tolerance, got {}",
+            tight.atol
+        );
+    }
+
+    #[test]
+    fn test_e2e_tolerance_tightening_forensic_log() {
+        // Run the full fixture bundle and emit an E2E forensic log
+        let cfg = HarnessConfig::default_paths();
+        let fixture_path = cfg
+            .fixture_root
+            .join("transforms/legacy_transform_cases.v1.json");
+        let bundle =
+            super::read_transform_fixture_bundle(&fixture_path).expect("bundle should load");
+        let report = run_transform_fixture_bundle(&cfg, &bundle);
+
+        // Build forensic log entry
+        let log_entry = serde_json::json!({
+            "scenario": "e2e_tolerance_tightening",
+            "fixture_family": "transforms",
+            "total_cases": report.total_cases,
+            "passed": report.matched_cases,
+            "failed": report.mismatched_cases,
+            "timestamp": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+        });
+
+        let log_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../artifacts/e2e/e2e_tolerance_tightening.e2e.json");
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&log_path, serde_json::to_string_pretty(&log_entry).unwrap())
+            .expect("should write forensic log");
+
+        assert_eq!(
+            report.mismatched_cases, 0,
+            "all fixtures should pass with tight tolerances"
         );
     }
 

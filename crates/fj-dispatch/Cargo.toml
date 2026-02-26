@@ -9,8 +9,10 @@ fj-backend-cpu = { path = "../fj-backend-cpu" }
 fj-cache = { path = "../fj-cache" }
 fj-core = { path = "../fj-core" }
 fj-interpreters = { path = "../fj-interpreters" }
+fj-lax = { path = "../fj-lax" }
 fj-ledger = { path = "../fj-ledger" }
 fj-runtime = { path = "../fj-runtime" }
+rustc-hash = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.8"

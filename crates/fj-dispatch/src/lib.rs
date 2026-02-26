@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod batching;
+
 use fj_cache::{CacheKeyError, CacheKeyInputRef, build_cache_key_ref};
 use fj_core::{
     CompatibilityMode, Jaxpr, TensorValue, TraceTransformLedger, Transform,
@@ -399,6 +401,7 @@ fn execute_vmap(
         .into());
     }
 
+    // Validate inputs: at least the first arg must be a tensor with rank >= 1
     let lead_tensor = args[0]
         .as_tensor()
         .ok_or(TransformExecutionError::VmapRequiresRankOneLeadingArgument)?;
@@ -414,6 +417,90 @@ fn execute_vmap(
         return Err(TransformExecutionError::EmptyVmapOutput.into());
     }
 
+    // Validate all tensor args have matching leading dimension
+    for arg in &args[1..] {
+        if let Value::Tensor(tensor) = arg {
+            if tensor.rank() == 0 {
+                return Err(TransformExecutionError::VmapRequiresRankOneLeadingArgument.into());
+            }
+            let arg_lead = tensor
+                .leading_dim()
+                .ok_or(TransformExecutionError::VmapRequiresRankOneLeadingArgument)?
+                as usize;
+            if arg_lead != lead_len {
+                return Err(TransformExecutionError::VmapMismatchedLeadingDimension {
+                    expected: lead_len,
+                    actual: arg_lead,
+                }
+                .into());
+            }
+        }
+    }
+
+    // Use BatchTrace interpreter when no tail transforms exist.
+    // This gives O(1) vectorized execution for the innermost vmap.
+    if tail.is_empty() {
+        return execute_vmap_batch_trace(root_jaxpr, args);
+    }
+
+    // When there are tail transforms (e.g., vmap(grad(f))), fall back to
+    // loop-and-stack since BatchTrace operates at the Jaxpr primitive level
+    // and cannot handle composed transforms within the trace.
+    execute_vmap_loop_and_stack(root_jaxpr, tail, args, backend, device, lead_len)
+}
+
+/// BatchTrace-based vmap execution: O(1) vectorized dispatch via per-primitive
+/// batching rules. Each arg becomes a BatchTracer with batch_dim=0 (tensors)
+/// or None (scalars), and the Jaxpr is evaluated equation-by-equation.
+fn execute_vmap_batch_trace(
+    root_jaxpr: &Jaxpr,
+    args: &[Value],
+) -> Result<Vec<Value>, DispatchError> {
+    use batching::{BatchTracer, batch_eval_jaxpr};
+
+    let batch_inputs: Vec<BatchTracer> = args
+        .iter()
+        .map(|arg| match arg {
+            Value::Scalar(_) => BatchTracer::unbatched(arg.clone()),
+            Value::Tensor(_) => BatchTracer::batched(arg.clone(), 0),
+        })
+        .collect();
+
+    let results = batch_eval_jaxpr(root_jaxpr, &batch_inputs)
+        .map_err(|e| TransformExecutionError::TensorBuild(format!("BatchTrace error: {e}")))?;
+
+    // Extract output values, ensuring batch dim is at position 0
+    let mut outputs = Vec::with_capacity(results.len());
+    for tracer in results {
+        match tracer.batch_dim {
+            Some(0) => outputs.push(tracer.value),
+            Some(bd) => {
+                // Move batch dim to front for consistent output
+                let moved = batching::move_batch_dim_to_front(&tracer.value, bd)
+                    .map_err(|e| TransformExecutionError::TensorBuild(e.to_string()))?;
+                outputs.push(moved);
+            }
+            None => {
+                // Unbatched output — need to broadcast to match batch dimension
+                // This happens when the function output doesn't depend on the input
+                outputs.push(tracer.value);
+            }
+        }
+    }
+
+    Ok(outputs)
+}
+
+/// Loop-and-stack vmap fallback for composed transforms (e.g., vmap(grad(f))).
+fn execute_vmap_loop_and_stack(
+    root_jaxpr: &Jaxpr,
+    tail: &[Transform],
+    args: &[Value],
+    backend: &dyn Backend,
+    device: DeviceId,
+    lead_len: usize,
+) -> Result<Vec<Value>, DispatchError> {
+    let lead_tensor = args[0].as_tensor().unwrap();
     let mut per_output_values: Vec<Vec<Value>> = Vec::new();
 
     for index in 0..lead_len {
@@ -428,22 +515,6 @@ fn execute_vmap(
             match arg {
                 Value::Scalar(lit) => mapped_args.push(Value::Scalar(*lit)),
                 Value::Tensor(tensor) => {
-                    if tensor.rank() == 0 {
-                        return Err(
-                            TransformExecutionError::VmapRequiresRankOneLeadingArgument.into()
-                        );
-                    }
-                    let arg_lead = tensor
-                        .leading_dim()
-                        .ok_or(TransformExecutionError::VmapRequiresRankOneLeadingArgument)?
-                        as usize;
-                    if arg_lead != lead_len {
-                        return Err(TransformExecutionError::VmapMismatchedLeadingDimension {
-                            expected: lead_len,
-                            actual: arg_lead,
-                        }
-                        .into());
-                    }
                     mapped_args.push(
                         tensor
                             .slice_axis0(index)

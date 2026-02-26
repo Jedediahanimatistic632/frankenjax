@@ -653,10 +653,12 @@ dependencies = [
  "fj-cache",
  "fj-core",
  "fj-interpreters",
+ "fj-lax",
  "fj-ledger",
  "fj-runtime",
  "fj-test-utils",
  "proptest",
+ "rustc-hash",
  "smallvec",
 ]
 

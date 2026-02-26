@@ -1499,10 +1499,175 @@ fn vjp(
             Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])])
         }
 
-        // ReduceWindow VJP: broadcast gradient back over the window positions.
-        // For sum: each input element receives g from every window that includes it.
-        // Simplified: return zeros (proper implementation requires window scatter).
-        Primitive::ReduceWindow => Ok(vec![zeros_like(&inputs[0])]),
+        // ReduceWindow VJP: scatter gradient back over the window positions.
+        Primitive::ReduceWindow => vjp_reduce_window(inputs, g, params),
+    }
+}
+
+/// ReduceWindow VJP: scatter gradient back over window positions.
+///
+/// For sum reduction: each input position receives the sum of output gradients
+/// from all windows that include it (select-and-scatter-add pattern).
+///
+/// For max reduction: gradient routes to the position of the max value in each
+/// window (subgradient). For min reduction: gradient routes to the min position.
+fn vjp_reduce_window(
+    inputs: &[Value],
+    g: &Value,
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, AdError> {
+    let input_tensor = match &inputs[0] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => return Ok(vec![g.clone()]),
+    };
+
+    let g_tensor = match g {
+        Value::Tensor(t) => t,
+        Value::Scalar(lit) => {
+            // Scalar gradient — input was scalar, passthrough
+            return Ok(vec![Value::Scalar(*lit)]);
+        }
+    };
+
+    let rank = input_tensor.shape.rank();
+
+    // Parse window parameters (same parsing as forward pass in fj-lax)
+    let window_dims: Vec<usize> = params
+        .get("window_dimensions")
+        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![2; rank]);
+
+    let strides: Vec<usize> = params
+        .get("window_strides")
+        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![1; rank]);
+
+    let reduce_op = params.get("reduce_op").map(|s| s.as_str()).unwrap_or("sum");
+
+    let _padding = params.get("padding").map(|s| s.as_str()).unwrap_or("valid");
+
+    let input_dims: Vec<usize> = input_tensor
+        .shape
+        .dims
+        .iter()
+        .map(|d| *d as usize)
+        .collect();
+    let out_dims: Vec<usize> = g_tensor.shape.dims.iter().map(|d| *d as usize).collect();
+
+    // Build input gradient tensor (same shape as input, initially zeros)
+    let total_input: usize = input_dims.iter().product();
+    let mut grad_elements = vec![0.0_f64; total_input];
+
+    let total_output: usize = out_dims.iter().product();
+    if total_output == 0 {
+        return Ok(vec![zeros_like(&inputs[0])]);
+    }
+
+    // Get input and gradient values as f64
+    let input_vals: Vec<f64> = input_tensor
+        .elements
+        .iter()
+        .map(|e| e.as_f64().unwrap_or(0.0))
+        .collect();
+    let g_vals: Vec<f64> = g_tensor
+        .elements
+        .iter()
+        .map(|e| e.as_f64().unwrap_or(0.0))
+        .collect();
+
+    // Iterate over all output positions
+    let mut out_idx = vec![0usize; rank];
+    for &g_val in g_vals.iter().take(total_output) {
+        match reduce_op {
+            "max" | "min" => {
+                // Find the position of the max/min value in this window
+                let mut best_flat: Option<usize> = None;
+                let mut best_val = if reduce_op == "max" {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                };
+
+                let win_total: usize = window_dims.iter().product();
+                let mut win_idx = vec![0usize; rank];
+
+                for _ in 0..win_total {
+                    let flat = compute_flat_index(&out_idx, &win_idx, &strides, &input_dims, rank);
+                    if let Some(flat_idx) = flat {
+                        let val = input_vals[flat_idx];
+                        let is_better = if reduce_op == "max" {
+                            val > best_val
+                        } else {
+                            val < best_val
+                        };
+                        if is_better {
+                            best_val = val;
+                            best_flat = Some(flat_idx);
+                        }
+                    }
+                    increment_nd_index(&mut win_idx, &window_dims);
+                }
+
+                if let Some(idx) = best_flat {
+                    grad_elements[idx] += g_val;
+                }
+            }
+            _ => {
+                // Sum reduction: gradient is scattered to all positions in the window
+                let win_total: usize = window_dims.iter().product();
+                let mut win_idx = vec![0usize; rank];
+
+                for _ in 0..win_total {
+                    let flat = compute_flat_index(&out_idx, &win_idx, &strides, &input_dims, rank);
+                    if let Some(flat_idx) = flat {
+                        grad_elements[flat_idx] += g_val;
+                    }
+                    increment_nd_index(&mut win_idx, &window_dims);
+                }
+            }
+        }
+
+        increment_nd_index(&mut out_idx, &out_dims);
+    }
+
+    // Build the gradient tensor
+    let elements: Vec<Literal> = grad_elements.into_iter().map(Literal::from_f64).collect();
+    let grad_tensor = TensorValue::new(input_tensor.dtype, input_tensor.shape.clone(), elements)
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+    Ok(vec![Value::Tensor(grad_tensor)])
+}
+
+/// Compute the flat input index for a given output position and window offset.
+/// Returns None if the position is out of bounds.
+fn compute_flat_index(
+    out_idx: &[usize],
+    win_idx: &[usize],
+    strides: &[usize],
+    input_dims: &[usize],
+    rank: usize,
+) -> Option<usize> {
+    let mut flat = 0usize;
+    let mut stride_mult = 1usize;
+    for d in (0..rank).rev() {
+        let input_pos = out_idx[d] * strides[d] + win_idx[d];
+        if input_pos >= input_dims[d] {
+            return None;
+        }
+        flat += input_pos * stride_mult;
+        stride_mult *= input_dims[d];
+    }
+    Some(flat)
+}
+
+/// Increment a multi-dimensional index.
+fn increment_nd_index(idx: &mut [usize], dims: &[usize]) {
+    for d in (0..idx.len()).rev() {
+        idx[d] += 1;
+        if idx[d] >= dims[d] {
+            idx[d] = 0;
+        } else {
+            return;
+        }
     }
 }
 
@@ -4698,5 +4863,301 @@ mod tests {
         // Each iteration i: d(final)/d(step_at_i) = init * step^(n-1) = 128/2 = 64 each
         // 7 iterations * 64 = 448
         assert_eq!(grads[1].as_f64_scalar().unwrap(), 448.0);
+    }
+
+    // ── ReduceWindow VJP tests ───────────────────────────────────────
+
+    #[test]
+    fn test_reduce_window_sum_vjp_1d() {
+        // ReduceWindow sum with window=3, stride=1 on [1,2,3,4,5]
+        // Forward output: [1+2+3, 2+3+4, 3+4+5] = [6, 9, 12]
+        // VJP with g=[1,1,1]:
+        //   input[0] appears in window 0 only => grad=1
+        //   input[1] appears in windows 0,1 => grad=2
+        //   input[2] appears in windows 0,1,2 => grad=3
+        //   input[3] appears in windows 1,2 => grad=2
+        //   input[4] appears in window 2 only => grad=1
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![5] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(4.0),
+                    Literal::from_f64(5.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("window_dimensions".into(), "3".into());
+        params.insert("window_strides".into(), "1".into());
+        params.insert("reduce_op".into(), "sum".into());
+
+        let grads = vjp(Primitive::ReduceWindow, &[input], &g, &params).unwrap();
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![1.0, 2.0, 3.0, 2.0, 1.0]);
+        } else {
+            panic!("expected tensor gradient");
+        }
+    }
+
+    #[test]
+    fn test_reduce_window_max_vjp_simple() {
+        // Max-pool on [1,5,3,2] with window=2, stride=1
+        // Forward: [max(1,5), max(5,3), max(3,2)] = [5, 5, 3]
+        // VJP with g=[10,20,30]:
+        //   Window 0: max at index 1 (val 5) => grad[1] += 10
+        //   Window 1: max at index 1 (val 5) => grad[1] += 20
+        //   Window 2: max at index 2 (val 3) => grad[2] += 30
+        //   Result: [0, 30, 30, 0]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![4] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(5.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(2.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(10.0),
+                    Literal::from_f64(20.0),
+                    Literal::from_f64(30.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("window_dimensions".into(), "2".into());
+        params.insert("window_strides".into(), "1".into());
+        params.insert("reduce_op".into(), "max".into());
+
+        let grads = vjp(Primitive::ReduceWindow, &[input], &g, &params).unwrap();
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![0.0, 30.0, 30.0, 0.0]);
+        } else {
+            panic!("expected tensor gradient");
+        }
+    }
+
+    #[test]
+    fn test_reduce_window_min_vjp_simple() {
+        // Min-pool on [4,1,3,2] with window=2, stride=1
+        // Forward: [min(4,1), min(1,3), min(3,2)] = [1, 1, 2]
+        // VJP with g=[10,20,30]:
+        //   Window 0: min at index 1 (val 1) => grad[1] += 10
+        //   Window 1: min at index 1 (val 1) => grad[1] += 20
+        //   Window 2: min at index 3 (val 2) => grad[3] += 30
+        //   Result: [0, 30, 0, 30]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![4] },
+                vec![
+                    Literal::from_f64(4.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(2.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(10.0),
+                    Literal::from_f64(20.0),
+                    Literal::from_f64(30.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("window_dimensions".into(), "2".into());
+        params.insert("window_strides".into(), "1".into());
+        params.insert("reduce_op".into(), "min".into());
+
+        let grads = vjp(Primitive::ReduceWindow, &[input], &g, &params).unwrap();
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![0.0, 30.0, 0.0, 30.0]);
+        } else {
+            panic!("expected tensor gradient");
+        }
+    }
+
+    #[test]
+    fn test_reduce_window_sum_vjp_strided() {
+        // ReduceWindow sum with window=2, stride=2 on [1,2,3,4,5,6]
+        // Forward: [1+2, 3+4, 5+6] = [3, 7, 11]
+        // VJP with g=[1,10,100]:
+        //   Window 0 covers positions [0,1] => grad[0]+=1, grad[1]+=1
+        //   Window 1 covers positions [2,3] => grad[2]+=10, grad[3]+=10
+        //   Window 2 covers positions [4,5] => grad[4]+=100, grad[5]+=100
+        //   Result: [1, 1, 10, 10, 100, 100]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![6] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(4.0),
+                    Literal::from_f64(5.0),
+                    Literal::from_f64(6.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(10.0),
+                    Literal::from_f64(100.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("window_dimensions".into(), "2".into());
+        params.insert("window_strides".into(), "2".into());
+        params.insert("reduce_op".into(), "sum".into());
+
+        let grads = vjp(Primitive::ReduceWindow, &[input], &g, &params).unwrap();
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![1.0, 1.0, 10.0, 10.0, 100.0, 100.0]);
+        } else {
+            panic!("expected tensor gradient");
+        }
+    }
+
+    #[test]
+    fn test_reduce_window_vjp_finite_diff() {
+        // Finite difference verification for ReduceWindow sum VJP
+        // f(x) = reduce_window_sum(x, window=2, stride=1)
+        // Check gradient via (f(x+eps) - f(x-eps)) / (2*eps) for each input element
+        let eps = 1e-5;
+        let base_vals = vec![2.0, 5.0, 1.0, 4.0, 3.0];
+
+        let mut params = BTreeMap::new();
+        params.insert("window_dimensions".into(), "2".into());
+        params.insert("window_strides".into(), "1".into());
+        params.insert("reduce_op".into(), "sum".into());
+
+        // Compute analytical gradient
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![5] },
+                base_vals.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .unwrap(),
+        );
+        // Output has 4 elements; use unit gradient
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![4] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let analytical = vjp(Primitive::ReduceWindow, &[input], &g, &params).unwrap();
+        let analytical_vals: Vec<f64> = match &analytical[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+
+        // For each input position, compute finite difference
+        for i in 0..5 {
+            let mut plus_vals = base_vals.clone();
+            plus_vals[i] += eps;
+            let plus_input = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: vec![5] },
+                    plus_vals.iter().map(|&v| Literal::from_f64(v)).collect(),
+                )
+                .unwrap(),
+            );
+            let plus_out = eval_primitive(
+                Primitive::ReduceWindow,
+                std::slice::from_ref(&plus_input),
+                &params,
+            )
+            .unwrap();
+
+            let mut minus_vals = base_vals.clone();
+            minus_vals[i] -= eps;
+            let minus_input = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: vec![5] },
+                    minus_vals.iter().map(|&v| Literal::from_f64(v)).collect(),
+                )
+                .unwrap(),
+            );
+            let minus_out = eval_primitive(
+                Primitive::ReduceWindow,
+                std::slice::from_ref(&minus_input),
+                &params,
+            )
+            .unwrap();
+
+            // Sum the output (since g is all-ones, gradient = sum of per-output partials)
+            let plus_sum: f64 = match &plus_out {
+                Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).sum(),
+                Value::Scalar(l) => l.as_f64().unwrap(),
+            };
+            let minus_sum: f64 = match &minus_out {
+                Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).sum(),
+                Value::Scalar(l) => l.as_f64().unwrap(),
+            };
+
+            let numerical = (plus_sum - minus_sum) / (2.0 * eps);
+            assert!(
+                (analytical_vals[i] - numerical).abs() < 1e-4,
+                "finite diff mismatch at position {i}: analytical={}, numerical={}",
+                analytical_vals[i],
+                numerical
+            );
+        }
     }
 }

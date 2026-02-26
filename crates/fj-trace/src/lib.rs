@@ -656,6 +656,146 @@ impl SimpleTraceContext {
                     shape: Shape { dims: out_dims },
                 }])
             }
+
+            Primitive::Cond => {
+                // Cond: inputs are [pred, true_val, false_val]
+                // Output shape = shape of true_val (both branches must match)
+                if inputs.len() != 3 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "cond expects 3 inputs (pred, true, false), got {}",
+                            inputs.len()
+                        ),
+                    });
+                }
+                let true_branch = &inputs[1];
+                let false_branch = &inputs[2];
+                if true_branch.shape != false_branch.shape {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "cond branches must have same shape: {:?} vs {:?}",
+                            true_branch.shape.dims, false_branch.shape.dims
+                        ),
+                    });
+                }
+                let dtype = promote_dtype(true_branch.dtype, false_branch.dtype);
+                Ok(vec![ShapedArray {
+                    dtype,
+                    shape: true_branch.shape.clone(),
+                }])
+            }
+
+            Primitive::Scan => {
+                // Scan: inputs are [init_carry, xs_tensor]
+                // Output shape = shape of init_carry (carry is threaded through)
+                if inputs.len() < 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "scan expects at least 2 inputs (init_carry, xs), got {}",
+                            inputs.len()
+                        ),
+                    });
+                }
+                let init_carry = &inputs[0];
+                Ok(vec![ShapedArray {
+                    dtype: init_carry.dtype,
+                    shape: init_carry.shape.clone(),
+                }])
+            }
+
+            Primitive::While => {
+                // While: inputs are [init_carry, step_value, threshold]
+                // Output shape = shape of init_carry (carry is threaded through)
+                if inputs.is_empty() {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "while expects at least 1 input (init_carry)".to_owned(),
+                    });
+                }
+                let init_carry = &inputs[0];
+                Ok(vec![ShapedArray {
+                    dtype: init_carry.dtype,
+                    shape: init_carry.shape.clone(),
+                }])
+            }
+
+            // Bitwise binary: same shape as inputs, integer type preserved
+            Primitive::BitwiseAnd
+            | Primitive::BitwiseOr
+            | Primitive::BitwiseXor
+            | Primitive::ShiftLeft
+            | Primitive::ShiftRight => {
+                if inputs.len() != 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("bitwise binary op expects 2 inputs, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![ShapedArray {
+                    dtype: inputs[0].dtype,
+                    shape: inputs[0].shape.clone(),
+                }])
+            }
+
+            // Bitwise/integer unary: same shape and type as input
+            Primitive::BitwiseNot | Primitive::PopulationCount | Primitive::CountLeadingZeros => {
+                if inputs.is_empty() {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("{} expects 1 input", primitive.as_str()),
+                    });
+                }
+                Ok(vec![ShapedArray {
+                    dtype: inputs[0].dtype,
+                    shape: inputs[0].shape.clone(),
+                }])
+            }
+
+            Primitive::ReduceWindow => {
+                if inputs.is_empty() {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "reduce_window expects at least 1 input".to_owned(),
+                    });
+                }
+                let input = &inputs[0];
+                // Calculate output shape from window_dimensions and strides
+                let window_dims: Vec<usize> = params
+                    .get("window_dimensions")
+                    .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                    .unwrap_or_else(|| vec![2; input.shape.rank()]);
+                let strides: Vec<usize> = params
+                    .get("window_strides")
+                    .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                    .unwrap_or_else(|| vec![1; input.shape.rank()]);
+                let padding = params.get("padding").map(|s| s.as_str()).unwrap_or("valid");
+
+                let mut out_dims = Vec::with_capacity(input.shape.rank());
+                for d in 0..input.shape.rank() {
+                    let input_dim = input.shape.dims[d] as usize;
+                    let win = *window_dims.get(d).unwrap_or(&2);
+                    let stride = *strides.get(d).unwrap_or(&1);
+                    let out_dim = match padding {
+                        "same" => input_dim.div_ceil(stride),
+                        _ => {
+                            if input_dim >= win {
+                                (input_dim - win) / stride + 1
+                            } else {
+                                0
+                            }
+                        }
+                    };
+                    out_dims.push(out_dim as u32);
+                }
+
+                Ok(vec![ShapedArray {
+                    dtype: promote_dtype(input.dtype, input.dtype),
+                    shape: Shape { dims: out_dims },
+                }])
+            }
         }
     }
 
@@ -710,6 +850,7 @@ impl SimpleTraceContext {
                 inputs: in_atoms,
                 outputs: out_vars,
                 params: eqn.params.clone(),
+                sub_jaxprs: vec![],
             });
         }
 

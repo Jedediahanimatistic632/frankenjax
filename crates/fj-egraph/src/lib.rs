@@ -301,7 +301,19 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             | Primitive::Cumprod
             | Primitive::Sort
             | Primitive::Argsort
-            | Primitive::Conv => {
+            | Primitive::Conv
+            | Primitive::Cond
+            | Primitive::Scan
+            | Primitive::While
+            | Primitive::BitwiseAnd
+            | Primitive::BitwiseOr
+            | Primitive::BitwiseXor
+            | Primitive::BitwiseNot
+            | Primitive::ShiftLeft
+            | Primitive::ShiftRight
+            | Primitive::ReduceWindow
+            | Primitive::PopulationCount
+            | Primitive::CountLeadingZeros => {
                 panic!(
                     "primitive {} not supported by egraph lowering",
                     eqn.primitive.as_str()
@@ -832,6 +844,7 @@ pub fn egraph_to_jaxpr(
                     inputs: smallvec![Atom::Lit(Literal::Bool(true)), lit_atom.clone(), lit_atom],
                     outputs: smallvec![*last_var],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 });
             }
         }
@@ -876,6 +889,7 @@ fn push_binary(
         inputs: smallvec![a_atom, b_atom],
         outputs: smallvec![out],
         params: BTreeMap::new(),
+        sub_jaxprs: vec![],
     });
 }
 
@@ -895,6 +909,7 @@ fn push_unary(
         inputs: smallvec![a_atom],
         outputs: smallvec![out],
         params: BTreeMap::new(),
+        sub_jaxprs: vec![],
     });
 }
 
@@ -919,6 +934,7 @@ fn push_ternary(
         inputs: smallvec![a_atom, b_atom, c_atom],
         outputs: smallvec![out],
         params: BTreeMap::new(),
+        sub_jaxprs: vec![],
     });
 }
 
@@ -1043,6 +1059,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(0))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1098,6 +1115,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::from_f64(2.5))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1142,12 +1160,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Neg,
                     inputs: smallvec![Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1179,6 +1199,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1203,12 +1224,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Exp,
                     inputs: smallvec![Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1235,12 +1258,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Abs,
                     inputs: smallvec![Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1271,6 +1296,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1293,12 +1319,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Floor,
                     inputs: smallvec![Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1324,6 +1352,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(0))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1358,6 +1387,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1381,6 +1411,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1405,12 +1436,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Expm1,
                     inputs: smallvec![Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1440,6 +1473,7 @@ mod tests {
                 ],
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1462,6 +1496,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1486,6 +1521,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1535,12 +1571,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Reciprocal,
                     inputs: smallvec![Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1567,12 +1605,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Sign,
                     inputs: smallvec![Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1599,30 +1639,35 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Mul,
                     inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Cos,
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(4)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Mul,
                     inputs: smallvec![Atom::Var(VarId(4)), Atom::Var(VarId(4))],
                     outputs: smallvec![VarId(5)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Add,
                     inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(5))],
                     outputs: smallvec![VarId(7)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1649,30 +1694,35 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Mul,
                     inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Sinh,
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(4)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Mul,
                     inputs: smallvec![Atom::Var(VarId(4)), Atom::Var(VarId(4))],
                     outputs: smallvec![VarId(5)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Sub,
                     inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(5))],
                     outputs: smallvec![VarId(7)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1699,24 +1749,28 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Neg,
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Logistic,
                     inputs: smallvec![Atom::Var(VarId(3))],
                     outputs: smallvec![VarId(4)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Add,
                     inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(4))],
                     outputs: smallvec![VarId(5)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1747,6 +1801,7 @@ mod tests {
                     ],
                     outputs: smallvec![VarId(5)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Select,
@@ -1757,6 +1812,7 @@ mod tests {
                     ],
                     outputs: smallvec![VarId(6)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1787,6 +1843,7 @@ mod tests {
                     ],
                     outputs: smallvec![VarId(5)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Select,
@@ -1797,6 +1854,7 @@ mod tests {
                     ],
                     outputs: smallvec![VarId(6)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1825,12 +1883,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(0))],
                     outputs: smallvec![VarId(1)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Mul,
                     inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1857,12 +1917,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Div,
                     inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1891,12 +1953,14 @@ mod tests {
                     inputs: smallvec![Atom::Lit(Literal::from_f64(1.0))],
                     outputs: smallvec![VarId(1)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Pow,
                     inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1922,6 +1986,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(0)), Atom::Lit(Literal::from_f64(2.0))],
                 outputs: smallvec![VarId(1)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
 
@@ -1951,12 +2016,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Log,
                     inputs: smallvec![Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -1987,12 +2054,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(0))],
                     outputs: smallvec![VarId(1)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Erf,
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -2021,12 +2090,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Max,
                     inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );
@@ -2053,12 +2124,14 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
                 Equation {
                     primitive: Primitive::Min,
                     inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 },
             ],
         );

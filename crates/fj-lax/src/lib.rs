@@ -6,7 +6,7 @@ mod reduction;
 mod tensor_ops;
 mod type_promotion;
 
-use fj_core::{Primitive, Shape, Value, ValueError};
+use fj_core::{Primitive, Shape, TensorValue, Value, ValueError};
 use std::collections::BTreeMap;
 
 use arithmetic::{
@@ -266,7 +266,519 @@ pub fn eval_primitive(
         Primitive::Argsort => eval_argsort(primitive, inputs, params),
         // Convolution
         Primitive::Conv => eval_conv(primitive, inputs, params),
+        // Control flow
+        Primitive::Cond => eval_cond(primitive, inputs),
+        Primitive::Scan => eval_scan(primitive, inputs, params),
+        Primitive::While => eval_while_loop(primitive, inputs, params),
+        // Bitwise
+        Primitive::BitwiseAnd => eval_bitwise_binary(primitive, inputs, |a, b| a & b),
+        Primitive::BitwiseOr => eval_bitwise_binary(primitive, inputs, |a, b| a | b),
+        Primitive::BitwiseXor => eval_bitwise_binary(primitive, inputs, |a, b| a ^ b),
+        Primitive::BitwiseNot => eval_bitwise_unary(primitive, inputs, |a| !a),
+        Primitive::ShiftLeft => eval_bitwise_binary(primitive, inputs, |a, b| a << b),
+        Primitive::ShiftRight => eval_bitwise_binary(primitive, inputs, |a, b| a >> b),
+        // Windowed reduction (pooling)
+        Primitive::ReduceWindow => eval_reduce_window(primitive, inputs, params),
+        // Integer intrinsics
+        Primitive::PopulationCount => {
+            eval_bitwise_unary(primitive, inputs, |a| a.count_ones() as i64)
+        }
+        Primitive::CountLeadingZeros => {
+            eval_bitwise_unary(primitive, inputs, |a| a.leading_zeros() as i64)
+        }
     }
+}
+
+/// Evaluate Cond: select between two operands based on a boolean predicate.
+///
+/// inputs: [predicate, true_value, false_value]
+/// Returns true_value if predicate is true, false_value otherwise.
+fn eval_cond(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    if inputs.len() != 3 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 3,
+            actual: inputs.len(),
+        });
+    }
+    let pred = match &inputs[0] {
+        Value::Scalar(fj_core::Literal::Bool(b)) => *b,
+        Value::Scalar(fj_core::Literal::I64(v)) => *v != 0,
+        Value::Scalar(fj_core::Literal::F64Bits(bits)) => f64::from_bits(*bits) != 0.0,
+        _ => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "cond predicate must be a scalar".to_owned(),
+            });
+        }
+    };
+    if pred {
+        Ok(inputs[1].clone())
+    } else {
+        Ok(inputs[2].clone())
+    }
+}
+
+/// Evaluate Scan: iterate a body operation over slices of a tensor, threading carry state.
+///
+/// inputs: [init_carry, xs_tensor]
+///   - init_carry: initial carry value (scalar or tensor)
+///   - xs_tensor: tensor whose leading axis is scanned over
+///
+/// params:
+///   - "body_op": the primitive to apply per iteration, e.g. "add", "mul"
+///     The body computes: new_carry = body_op(carry, x_slice)
+///   - "length": optional explicit scan length (inferred from xs if absent)
+///   - "reverse": "true" to scan in reverse order (default: "false")
+///
+/// Returns the final carry value after all iterations.
+fn eval_scan(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    if inputs.len() < 2 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 2,
+            actual: inputs.len(),
+        });
+    }
+
+    let init_carry = &inputs[0];
+    let xs = &inputs[1];
+
+    // Determine body operation (defaults to Add if not specified)
+    let body_op_name = params.get("body_op").map(|s| s.as_str()).unwrap_or("add");
+    let body_op = match body_op_name {
+        "add" => Primitive::Add,
+        "sub" => Primitive::Sub,
+        "mul" => Primitive::Mul,
+        "max" => Primitive::Max,
+        "min" => Primitive::Min,
+        other => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("unsupported scan body_op: {other}"),
+            });
+        }
+    };
+
+    let reverse = params.get("reverse").map(|s| s == "true").unwrap_or(false);
+
+    // Extract slices from xs along leading axis
+    match xs {
+        Value::Scalar(_) => {
+            // Single element scan — just apply body_op to carry and xs
+            eval_primitive(body_op, &[init_carry.clone(), xs.clone()], &BTreeMap::new())
+        }
+        Value::Tensor(t) => {
+            let leading_dim = t.shape.dims[0] as usize;
+            if leading_dim == 0 {
+                return Ok(init_carry.clone());
+            }
+
+            // Compute the shape of each slice (drop leading axis)
+            let slice_shape = if t.shape.rank() == 1 {
+                // Vector: each slice is a scalar
+                None
+            } else {
+                // Higher-rank: each slice has shape dims[1..]
+                Some(Shape {
+                    dims: t.shape.dims[1..].into(),
+                })
+            };
+
+            let slice_size: usize = if let Some(ref s) = slice_shape {
+                s.dims.iter().map(|d| *d as usize).product()
+            } else {
+                1
+            };
+
+            let mut carry = init_carry.clone();
+            let indices: Vec<usize> = if reverse {
+                (0..leading_dim).rev().collect()
+            } else {
+                (0..leading_dim).collect()
+            };
+
+            for i in indices {
+                let start = i * slice_size;
+                let end = start + slice_size;
+                let slice_elements = t.elements[start..end].to_vec();
+
+                let x_slice = if let Some(ref s) = slice_shape {
+                    Value::Tensor(
+                        TensorValue::new(t.dtype, s.clone(), slice_elements)
+                            .map_err(EvalError::InvalidTensor)?,
+                    )
+                } else {
+                    Value::Scalar(slice_elements[0])
+                };
+
+                carry = eval_primitive(body_op, &[carry, x_slice], &BTreeMap::new())?;
+            }
+
+            Ok(carry)
+        }
+    }
+}
+
+/// Evaluate While: iterate a body operation on carry while a condition holds.
+///
+/// inputs: [init_carry, step_value, threshold]
+///   - init_carry: initial carry value (scalar)
+///   - step_value: value applied via body_op each iteration
+///   - threshold: value compared against via cond_op
+///
+/// params:
+///   - "body_op": the primitive to apply per iteration, e.g. "add", "mul"
+///     The body computes: new_carry = body_op(carry, step_value)
+///   - "cond_op": comparison primitive, e.g. "lt", "le", "gt", "ge"
+///     Loop continues while: cond_op(carry, threshold) is true
+///   - "max_iter": safety limit on iterations (default: 1000)
+///
+/// Returns the final carry value when the condition becomes false.
+fn eval_while_loop(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    if inputs.len() < 3 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 3,
+            actual: inputs.len(),
+        });
+    }
+
+    let init_carry = &inputs[0];
+    let step_value = &inputs[1];
+    let threshold = &inputs[2];
+
+    let body_op_name = params.get("body_op").map(|s| s.as_str()).unwrap_or("add");
+    let body_op = match body_op_name {
+        "add" => Primitive::Add,
+        "sub" => Primitive::Sub,
+        "mul" => Primitive::Mul,
+        other => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("unsupported while body_op: {other}"),
+            });
+        }
+    };
+
+    let cond_op_name = params.get("cond_op").map(|s| s.as_str()).unwrap_or("lt");
+    let cond_op = match cond_op_name {
+        "lt" => Primitive::Lt,
+        "le" => Primitive::Le,
+        "gt" => Primitive::Gt,
+        "ge" => Primitive::Ge,
+        other => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("unsupported while cond_op: {other}"),
+            });
+        }
+    };
+
+    let max_iter: usize = params
+        .get("max_iter")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000);
+
+    let mut carry = init_carry.clone();
+
+    for _ in 0..max_iter {
+        // Check condition: cond_op(carry, threshold)
+        let cond_result = eval_primitive(
+            cond_op,
+            &[carry.clone(), threshold.clone()],
+            &BTreeMap::new(),
+        )?;
+        let continue_loop = match &cond_result {
+            Value::Scalar(fj_core::Literal::Bool(b)) => *b,
+            Value::Scalar(fj_core::Literal::I64(v)) => *v != 0,
+            _ => false,
+        };
+        if !continue_loop {
+            break;
+        }
+        carry = eval_primitive(body_op, &[carry, step_value.clone()], &BTreeMap::new())?;
+    }
+
+    Ok(carry)
+}
+
+/// Evaluate a binary bitwise operation on integer values.
+fn eval_bitwise_binary(
+    primitive: Primitive,
+    inputs: &[Value],
+    op: fn(i64, i64) -> i64,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 2 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 2,
+            actual: inputs.len(),
+        });
+    }
+    match (&inputs[0], &inputs[1]) {
+        (Value::Scalar(fj_core::Literal::I64(a)), Value::Scalar(fj_core::Literal::I64(b))) => {
+            Ok(Value::scalar_i64(op(*a, *b)))
+        }
+        (Value::Tensor(a), Value::Tensor(b)) => {
+            if a.shape != b.shape {
+                return Err(EvalError::ShapeMismatch {
+                    primitive,
+                    left: a.shape.clone(),
+                    right: b.shape.clone(),
+                });
+            }
+            let elements: Result<Vec<_>, _> = a
+                .elements
+                .iter()
+                .zip(b.elements.iter())
+                .map(|(ea, eb)| match (ea, eb) {
+                    (fj_core::Literal::I64(va), fj_core::Literal::I64(vb)) => {
+                        Ok(fj_core::Literal::I64(op(*va, *vb)))
+                    }
+                    _ => Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "bitwise ops require integer types",
+                    }),
+                })
+                .collect();
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::I64, a.shape.clone(), elements?)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        _ => Err(EvalError::TypeMismatch {
+            primitive,
+            detail: "bitwise ops require integer types",
+        }),
+    }
+}
+
+/// Evaluate a unary bitwise operation on integer values.
+fn eval_bitwise_unary(
+    primitive: Primitive,
+    inputs: &[Value],
+    op: fn(i64) -> i64,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+    match &inputs[0] {
+        Value::Scalar(fj_core::Literal::I64(a)) => Ok(Value::scalar_i64(op(*a))),
+        Value::Tensor(t) => {
+            let elements: Result<Vec<_>, _> = t
+                .elements
+                .iter()
+                .map(|e| match e {
+                    fj_core::Literal::I64(v) => Ok(fj_core::Literal::I64(op(*v))),
+                    _ => Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "bitwise ops require integer types",
+                    }),
+                })
+                .collect();
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::I64, t.shape.clone(), elements?)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        _ => Err(EvalError::TypeMismatch {
+            primitive,
+            detail: "bitwise ops require integer types",
+        }),
+    }
+}
+
+/// Evaluate ReduceWindow: apply a reduction over sliding windows of a tensor.
+///
+/// inputs: [tensor]
+/// params:
+///   - "reduce_op": "sum", "max", "min" (default: "sum")
+///   - "window_dimensions": comma-separated window sizes per dimension, e.g. "2,2"
+///   - "window_strides": comma-separated strides, e.g. "1,1" (default: all 1s)
+///   - "padding": "valid" or "same" (default: "valid")
+///
+/// Returns the reduced tensor with output shape determined by window/stride/padding.
+fn eval_reduce_window(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    if inputs.is_empty() {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let tensor = match &inputs[0] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => return Ok(inputs[0].clone()), // scalar passthrough
+    };
+
+    let rank = tensor.shape.rank();
+
+    // Parse window dimensions
+    let window_dims: Vec<usize> = params
+        .get("window_dimensions")
+        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![2; rank]);
+
+    if window_dims.len() != rank {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "window_dimensions length {} doesn't match tensor rank {}",
+                window_dims.len(),
+                rank
+            ),
+        });
+    }
+
+    // Parse strides
+    let strides: Vec<usize> = params
+        .get("window_strides")
+        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![1; rank]);
+
+    // Determine reduction operation
+    let reduce_op = params.get("reduce_op").map(|s| s.as_str()).unwrap_or("sum");
+
+    let padding = params.get("padding").map(|s| s.as_str()).unwrap_or("valid");
+
+    // Calculate output dimensions
+    let mut out_dims: Vec<u32> = Vec::with_capacity(rank);
+    for d in 0..rank {
+        let input_dim = tensor.shape.dims[d] as usize;
+        let win = window_dims[d];
+        let stride = strides[d];
+        let out_dim = match padding {
+            "same" => input_dim.div_ceil(stride),
+            _ => {
+                // "valid"
+                if input_dim >= win {
+                    (input_dim - win) / stride + 1
+                } else {
+                    0
+                }
+            }
+        };
+        out_dims.push(out_dim as u32);
+    }
+
+    let total_output: usize = out_dims.iter().map(|d| *d as usize).product();
+    if total_output == 0 {
+        return Ok(Value::Tensor(
+            TensorValue::new(
+                tensor.dtype,
+                Shape {
+                    dims: out_dims.clone(),
+                },
+                vec![],
+            )
+            .map_err(EvalError::InvalidTensor)?,
+        ));
+    }
+
+    // For 1D case: straightforward sliding window
+    // For N-D: use multi-dimensional indexing
+    let input_dims: Vec<usize> = tensor.shape.dims.iter().map(|d| *d as usize).collect();
+
+    let mut output_elements = Vec::with_capacity(total_output);
+
+    // Iterate over all output positions using multi-dimensional index
+    let out_dims_usize: Vec<usize> = out_dims.iter().map(|d| *d as usize).collect();
+    let mut out_idx = vec![0usize; rank];
+
+    for _ in 0..total_output {
+        // For this output position, compute the window
+        let init_val = match reduce_op {
+            "max" => f64::NEG_INFINITY,
+            "min" => f64::INFINITY,
+            _ => 0.0, // sum
+        };
+        let mut accum = init_val;
+
+        // Iterate over all positions within the window
+        let mut win_idx = vec![0usize; rank];
+        let win_total: usize = window_dims.iter().product();
+
+        for _ in 0..win_total {
+            // Compute input index for this window position
+            let mut in_bounds = true;
+            let mut flat_input_idx = 0usize;
+            let mut stride_mult = 1usize;
+
+            for d in (0..rank).rev() {
+                let input_pos = out_idx[d] * strides[d] + win_idx[d];
+                if input_pos >= input_dims[d] {
+                    in_bounds = false;
+                    break;
+                }
+                flat_input_idx += input_pos * stride_mult;
+                stride_mult *= input_dims[d];
+            }
+
+            if in_bounds {
+                let val = tensor.elements[flat_input_idx].as_f64().unwrap_or(0.0);
+                match reduce_op {
+                    "max" => accum = accum.max(val),
+                    "min" => accum = accum.min(val),
+                    _ => accum += val,
+                }
+            }
+
+            // Increment window index
+            let mut carry = true;
+            for d in (0..rank).rev() {
+                if carry {
+                    win_idx[d] += 1;
+                    if win_idx[d] >= window_dims[d] {
+                        win_idx[d] = 0;
+                    } else {
+                        carry = false;
+                    }
+                }
+            }
+        }
+
+        output_elements.push(fj_core::Literal::from_f64(accum));
+
+        // Increment output index
+        let mut carry = true;
+        for d in (0..rank).rev() {
+            if carry {
+                out_idx[d] += 1;
+                if out_idx[d] >= out_dims_usize[d] {
+                    out_idx[d] = 0;
+                } else {
+                    carry = false;
+                }
+            }
+        }
+    }
+
+    Ok(Value::Tensor(
+        TensorValue::new(
+            fj_core::DType::F64,
+            Shape { dims: out_dims },
+            output_elements,
+        )
+        .map_err(EvalError::InvalidTensor)?,
+    ))
 }
 
 #[cfg(test)]
@@ -3060,6 +3572,474 @@ mod tests {
         } else {
             panic!("expected tensor");
         }
+    }
+
+    #[test]
+    fn cond_true_returns_true_branch() {
+        let pred = Value::scalar_bool(true);
+        let true_val = Value::scalar_f64(42.0);
+        let false_val = Value::scalar_f64(99.0);
+        let params = BTreeMap::new();
+        let out = eval_primitive(Primitive::Cond, &[pred, true_val, false_val], &params).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 42.0);
+    }
+
+    #[test]
+    fn cond_false_returns_false_branch() {
+        let pred = Value::scalar_bool(false);
+        let true_val = Value::scalar_f64(42.0);
+        let false_val = Value::scalar_f64(99.0);
+        let params = BTreeMap::new();
+        let out = eval_primitive(Primitive::Cond, &[pred, true_val, false_val], &params).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 99.0);
+    }
+
+    #[test]
+    fn cond_with_tensor_branches() {
+        let pred = Value::scalar_bool(true);
+        let true_val = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let false_val = Value::vector_f64(&[4.0, 5.0, 6.0]).unwrap();
+        let params = BTreeMap::new();
+        let out = eval_primitive(Primitive::Cond, &[pred, true_val, false_val], &params).unwrap();
+        if let Value::Tensor(t) = out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![1.0, 2.0, 3.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn cond_i64_pred_nonzero_is_true() {
+        let pred = Value::scalar_i64(1);
+        let true_val = Value::scalar_f64(10.0);
+        let false_val = Value::scalar_f64(20.0);
+        let params = BTreeMap::new();
+        let out = eval_primitive(Primitive::Cond, &[pred, true_val, false_val], &params).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 10.0);
+    }
+
+    #[test]
+    fn cond_arity_error() {
+        let params = BTreeMap::new();
+        let result = eval_primitive(Primitive::Cond, &[Value::scalar_bool(true)], &params);
+        assert!(result.is_err());
+    }
+
+    // ── Scan tests ──────────────────────────────────────────────────
+
+    fn scan_params(body_op: &str) -> BTreeMap<String, String> {
+        let mut p = BTreeMap::new();
+        p.insert("body_op".to_owned(), body_op.to_owned());
+        p
+    }
+
+    fn scan_params_reverse(body_op: &str) -> BTreeMap<String, String> {
+        let mut p = BTreeMap::new();
+        p.insert("body_op".to_owned(), body_op.to_owned());
+        p.insert("reverse".to_owned(), "true".to_owned());
+        p
+    }
+
+    #[test]
+    fn scan_add_vector() {
+        // scan(add, 0.0, [1,2,3,4]) => 0+1+2+3+4 = 10
+        let init = Value::scalar_f64(0.0);
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let out = eval_primitive(Primitive::Scan, &[init, xs], &scan_params("add")).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 10.0);
+    }
+
+    #[test]
+    fn scan_mul_vector() {
+        // scan(mul, 1.0, [2,3,4]) => 1*2*3*4 = 24
+        let init = Value::scalar_f64(1.0);
+        let xs = Value::vector_f64(&[2.0, 3.0, 4.0]).unwrap();
+        let out = eval_primitive(Primitive::Scan, &[init, xs], &scan_params("mul")).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 24.0);
+    }
+
+    #[test]
+    fn scan_add_reverse() {
+        // scan(add, 0.0, [1,2,3], reverse=true) => 0+3+2+1 = 6 (same as forward for add)
+        let init = Value::scalar_f64(0.0);
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let out =
+            eval_primitive(Primitive::Scan, &[init, xs], &scan_params_reverse("add")).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 6.0);
+    }
+
+    #[test]
+    fn scan_sub_reverse() {
+        // scan(sub, 10.0, [1,2,3], reverse=true) => ((10-3)-2)-1 = 4
+        let init = Value::scalar_f64(10.0);
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let out =
+            eval_primitive(Primitive::Scan, &[init, xs], &scan_params_reverse("sub")).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 4.0);
+    }
+
+    #[test]
+    fn scan_max_vector() {
+        // scan(max, -inf, [3,1,4,1,5]) => 5
+        let init = Value::scalar_f64(f64::NEG_INFINITY);
+        let xs = Value::vector_f64(&[3.0, 1.0, 4.0, 1.0, 5.0]).unwrap();
+        let out = eval_primitive(Primitive::Scan, &[init, xs], &scan_params("max")).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 5.0);
+    }
+
+    #[test]
+    fn scan_with_tensor_slices() {
+        // xs shape [2, 3]: scan(add, [0,0,0], [[1,2,3],[4,5,6]]) => [5,7,9]
+        let init = Value::vector_f64(&[0.0, 0.0, 0.0]).unwrap();
+        let xs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(4.0),
+                    Literal::from_f64(5.0),
+                    Literal::from_f64(6.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Scan, &[init, xs], &scan_params("add")).unwrap();
+        if let Value::Tensor(t) = out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![5.0, 7.0, 9.0]);
+        } else {
+            panic!("expected tensor output");
+        }
+    }
+
+    #[test]
+    fn scan_arity_error() {
+        let result = eval_primitive(Primitive::Scan, &[Value::scalar_f64(0.0)], &no_params());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scan_empty_tensor() {
+        // Scan over empty leading axis returns init_carry unchanged
+        let init = Value::scalar_f64(42.0);
+        let xs =
+            Value::Tensor(TensorValue::new(DType::F64, Shape { dims: vec![0] }, vec![]).unwrap());
+        let out = eval_primitive(Primitive::Scan, &[init, xs], &scan_params("add")).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 42.0);
+    }
+
+    // ── While loop tests ────────────────────────────────────────────
+
+    fn while_params(body_op: &str, cond_op: &str) -> BTreeMap<String, String> {
+        let mut p = BTreeMap::new();
+        p.insert("body_op".to_owned(), body_op.to_owned());
+        p.insert("cond_op".to_owned(), cond_op.to_owned());
+        p
+    }
+
+    #[test]
+    fn while_add_until_ge_threshold() {
+        // while carry < 10: carry += 3 => 0, 3, 6, 9, 12 => stops at 12
+        let init = Value::scalar_f64(0.0);
+        let step = Value::scalar_f64(3.0);
+        let threshold = Value::scalar_f64(10.0);
+        let out = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params("add", "lt"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 12.0);
+    }
+
+    #[test]
+    fn while_mul_until_ge_threshold() {
+        // while carry < 100: carry *= 2 => 1, 2, 4, 8, 16, 32, 64, 128 => stops at 128
+        let init = Value::scalar_f64(1.0);
+        let step = Value::scalar_f64(2.0);
+        let threshold = Value::scalar_f64(100.0);
+        let out = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params("mul", "lt"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 128.0);
+    }
+
+    #[test]
+    fn while_sub_until_le_zero() {
+        // while carry > 0: carry -= 2 => 10, 8, 6, 4, 2, 0 => stops at 0
+        let init = Value::scalar_f64(10.0);
+        let step = Value::scalar_f64(2.0);
+        let threshold = Value::scalar_f64(0.0);
+        let out = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params("sub", "gt"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn while_condition_false_immediately() {
+        // carry = 10, while carry < 5: carry += 1 => condition false, returns 10
+        let init = Value::scalar_f64(10.0);
+        let step = Value::scalar_f64(1.0);
+        let threshold = Value::scalar_f64(5.0);
+        let out = eval_primitive(
+            Primitive::While,
+            &[init, step, threshold],
+            &while_params("add", "lt"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 10.0);
+    }
+
+    #[test]
+    fn while_arity_error() {
+        let result = eval_primitive(
+            Primitive::While,
+            &[Value::scalar_f64(0.0)],
+            &while_params("add", "lt"),
+        );
+        assert!(result.is_err());
+    }
+
+    // ── Bitwise tests ───────────────────────────────────────────────
+
+    #[test]
+    fn bitwise_and_scalars() {
+        let a = Value::scalar_i64(0b1100);
+        let b = Value::scalar_i64(0b1010);
+        let out = eval_primitive(Primitive::BitwiseAnd, &[a, b], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 0b1000);
+    }
+
+    #[test]
+    fn bitwise_or_scalars() {
+        let a = Value::scalar_i64(0b1100);
+        let b = Value::scalar_i64(0b1010);
+        let out = eval_primitive(Primitive::BitwiseOr, &[a, b], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 0b1110);
+    }
+
+    #[test]
+    fn bitwise_xor_scalars() {
+        let a = Value::scalar_i64(0b1100);
+        let b = Value::scalar_i64(0b1010);
+        let out = eval_primitive(Primitive::BitwiseXor, &[a, b], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 0b0110);
+    }
+
+    #[test]
+    fn bitwise_not_scalar() {
+        let a = Value::scalar_i64(0);
+        let out = eval_primitive(Primitive::BitwiseNot, &[a], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), -1); // !0 = all ones = -1 in two's complement
+    }
+
+    #[test]
+    fn shift_left_scalar() {
+        let a = Value::scalar_i64(1);
+        let b = Value::scalar_i64(4);
+        let out = eval_primitive(Primitive::ShiftLeft, &[a, b], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 16);
+    }
+
+    #[test]
+    fn shift_right_scalar() {
+        let a = Value::scalar_i64(16);
+        let b = Value::scalar_i64(2);
+        let out = eval_primitive(Primitive::ShiftRight, &[a, b], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 4);
+    }
+
+    #[test]
+    fn bitwise_type_error_f64() {
+        let a = Value::scalar_f64(1.0);
+        let b = Value::scalar_f64(2.0);
+        let result = eval_primitive(Primitive::BitwiseAnd, &[a, b], &no_params());
+        assert!(result.is_err());
+    }
+
+    // ── PopulationCount / CountLeadingZeros tests ─────────────────────
+
+    #[test]
+    fn population_count_scalar() {
+        let a = Value::scalar_i64(0b1010_1100);
+        let out = eval_primitive(Primitive::PopulationCount, &[a], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 4);
+    }
+
+    #[test]
+    fn population_count_zero() {
+        let a = Value::scalar_i64(0);
+        let out = eval_primitive(Primitive::PopulationCount, &[a], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 0);
+    }
+
+    #[test]
+    fn population_count_all_ones() {
+        let a = Value::scalar_i64(-1); // all bits set
+        let out = eval_primitive(Primitive::PopulationCount, &[a], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 64);
+    }
+
+    #[test]
+    fn count_leading_zeros_scalar() {
+        let a = Value::scalar_i64(1);
+        let out = eval_primitive(Primitive::CountLeadingZeros, &[a], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 63);
+    }
+
+    #[test]
+    fn count_leading_zeros_zero() {
+        let a = Value::scalar_i64(0);
+        let out = eval_primitive(Primitive::CountLeadingZeros, &[a], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 64);
+    }
+
+    #[test]
+    fn count_leading_zeros_negative() {
+        let a = Value::scalar_i64(-1); // all ones, no leading zeros
+        let out = eval_primitive(Primitive::CountLeadingZeros, &[a], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 0);
+    }
+
+    #[test]
+    fn population_count_type_error() {
+        let a = Value::scalar_f64(1.0);
+        let result = eval_primitive(Primitive::PopulationCount, &[a], &no_params());
+        assert!(result.is_err());
+    }
+
+    // ── ReduceWindow tests ──────────────────────────────────────────
+
+    fn rw_params(reduce_op: &str, window: &str, strides: &str) -> BTreeMap<String, String> {
+        let mut p = BTreeMap::new();
+        p.insert("reduce_op".to_owned(), reduce_op.to_owned());
+        p.insert("window_dimensions".to_owned(), window.to_owned());
+        p.insert("window_strides".to_owned(), strides.to_owned());
+        p
+    }
+
+    #[test]
+    fn reduce_window_sum_1d() {
+        // [1, 2, 3, 4, 5], window=3, stride=1, valid => [6, 9, 12]
+        let input = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
+        let out = eval_primitive(
+            Primitive::ReduceWindow,
+            &[input],
+            &rw_params("sum", "3", "1"),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![6.0, 9.0, 12.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn reduce_window_max_1d() {
+        // [1, 3, 2, 5, 4], window=2, stride=1, valid => [3, 3, 5, 5]
+        let input = Value::vector_f64(&[1.0, 3.0, 2.0, 5.0, 4.0]).unwrap();
+        let out = eval_primitive(
+            Primitive::ReduceWindow,
+            &[input],
+            &rw_params("max", "2", "1"),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![3.0, 3.0, 5.0, 5.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn reduce_window_max_1d_stride2() {
+        // [1, 3, 2, 5, 4, 6], window=2, stride=2, valid => [3, 5, 6]
+        let input = Value::vector_f64(&[1.0, 3.0, 2.0, 5.0, 4.0, 6.0]).unwrap();
+        let out = eval_primitive(
+            Primitive::ReduceWindow,
+            &[input],
+            &rw_params("max", "2", "2"),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![3.0, 5.0, 6.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn reduce_window_sum_2d() {
+        // [[1, 2, 3],
+        //  [4, 5, 6],
+        //  [7, 8, 9]]
+        // window=2x2, stride=1x1 => [[12, 16], [24, 28]]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3, 3] },
+                (1..=9).map(|v| Literal::from_f64(v as f64)).collect(),
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(
+            Primitive::ReduceWindow,
+            &[input],
+            &rw_params("sum", "2,2", "1,1"),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = out {
+            assert_eq!(t.shape.dims, vec![2, 2]);
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![12.0, 16.0, 24.0, 28.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn reduce_window_min_1d() {
+        // [5, 3, 7, 1, 4], window=3, stride=1 => [3, 1, 1]
+        let input = Value::vector_f64(&[5.0, 3.0, 7.0, 1.0, 4.0]).unwrap();
+        let out = eval_primitive(
+            Primitive::ReduceWindow,
+            &[input],
+            &rw_params("min", "3", "1"),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![3.0, 1.0, 1.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn reduce_window_scalar_passthrough() {
+        let input = Value::scalar_f64(42.0);
+        let out = eval_primitive(
+            Primitive::ReduceWindow,
+            &[input],
+            &rw_params("sum", "1", "1"),
+        )
+        .unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 42.0);
     }
 }
 

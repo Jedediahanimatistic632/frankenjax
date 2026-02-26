@@ -52,6 +52,7 @@ fn build_chain_jaxpr(n: usize) -> Jaxpr {
             inputs: smallvec::smallvec![Atom::Var(input_var), Atom::Lit(Literal::I64(1))],
             outputs: smallvec::smallvec![output_var],
             params: BTreeMap::new(),
+            sub_jaxprs: vec![],
         });
     }
     Jaxpr::new(
@@ -613,6 +614,7 @@ fn adversarial_unbound_variable_reference() {
             ],
             outputs: smallvec::smallvec![VarId(3)],
             params: BTreeMap::new(),
+            sub_jaxprs: vec![],
         }],
     );
 

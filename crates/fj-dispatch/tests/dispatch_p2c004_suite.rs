@@ -210,6 +210,7 @@ fn grad_sin_at_zero_is_one() {
             inputs: smallvec::smallvec![Atom::Var(VarId(1))],
             outputs: smallvec::smallvec![VarId(2)],
             params: BTreeMap::new(),
+            sub_jaxprs: vec![],
         }],
     );
     let mut ttl = TraceTransformLedger::new(jaxpr);

@@ -84,6 +84,8 @@ pub fn arb_primitive() -> impl Strategy<Value = Primitive> {
         Just(Primitive::ReduceMin),
         Just(Primitive::ReduceProd),
         Just(Primitive::Pad),
+        Just(Primitive::PopulationCount),
+        Just(Primitive::CountLeadingZeros),
     ]
 }
 
@@ -117,6 +119,7 @@ pub fn arb_binary_jaxpr() -> impl Strategy<Value = Jaxpr> {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         )
     })
@@ -143,6 +146,7 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
                 }],
             );
             let fp1 = jaxpr.canonical_fingerprint().to_owned();

@@ -187,6 +187,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
         let outputs =
@@ -206,6 +207,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
+                sub_jaxprs: vec![],
             }],
         );
         let err = eval_jaxpr_with_consts(&jaxpr, &[], &[Value::scalar_i64(7)])
@@ -275,6 +277,7 @@ mod tests {
                         inputs: smallvec![Atom::Var(VarId(1))],
                         outputs: smallvec![VarId(2)],
                         params: BTreeMap::new(),
+                        sub_jaxprs: vec![],
                     }],
                 );
                 let out = eval_jaxpr(&jaxpr, &[Value::scalar_f64(x)])

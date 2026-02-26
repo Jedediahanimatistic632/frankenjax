@@ -184,7 +184,9 @@ pub fn primitive_arity(primitive: Primitive) -> usize {
         | Primitive::Pow | Primitive::Div | Primitive::Rem | Primitive::Atan2
         | Primitive::Dot | Primitive::Gather
         | Primitive::Eq | Primitive::Ne | Primitive::Lt | Primitive::Le
-        | Primitive::Gt | Primitive::Ge | Primitive::Concatenate | Primitive::Pad => 2,
+        | Primitive::Gt | Primitive::Ge | Primitive::Concatenate | Primitive::Pad
+        | Primitive::BitwiseAnd | Primitive::BitwiseOr | Primitive::BitwiseXor
+        | Primitive::ShiftLeft | Primitive::ShiftRight => 2,
         // Ternary ops
         Primitive::Select | Primitive::Scatter | Primitive::Clamp => 3,
         // Unary ops
@@ -197,9 +199,14 @@ pub fn primitive_arity(primitive: Primitive) -> usize {
         | Primitive::Reciprocal | Primitive::Logistic | Primitive::Erf | Primitive::Erfc
         | Primitive::ReduceSum | Primitive::ReduceMax | Primitive::ReduceMin | Primitive::ReduceProd
         | Primitive::Reshape | Primitive::Slice | Primitive::Transpose
-        | Primitive::BroadcastInDim | Primitive::DynamicSlice => 1,
+        | Primitive::BroadcastInDim | Primitive::DynamicSlice | Primitive::BitwiseNot | Primitive::ReduceWindow
+        | Primitive::PopulationCount | Primitive::CountLeadingZeros => 1,
         // Nullary ops
         Primitive::Iota => 0,
+        // Other primitives with variable or unspecified arity
+        Primitive::DynamicUpdateSlice | Primitive::OneHot | Primitive::Cumsum | Primitive::Cumprod
+        | Primitive::Sort | Primitive::Argsort | Primitive::Conv | Primitive::Cond
+        | Primitive::Scan | Primitive::While => 1, // Default placeholder
     }
 }
 

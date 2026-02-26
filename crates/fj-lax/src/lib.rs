@@ -4,9 +4,10 @@ mod arithmetic;
 mod comparison;
 mod reduction;
 mod tensor_ops;
+pub mod threefry;
 mod type_promotion;
 
-use fj_core::{Primitive, Shape, TensorValue, Value, ValueError};
+use fj_core::{Literal, Primitive, Shape, TensorValue, Value, ValueError};
 use std::collections::BTreeMap;
 
 use arithmetic::{
@@ -358,7 +359,7 @@ fn eval_cond(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError>
 ///   - "length": optional explicit scan length (inferred from xs if absent)
 ///   - "reverse": "true" to scan in reverse order (default: "false")
 ///
-/// Returns the final carry value after all iterations.
+/// Returns the final carry value after all iterations (legacy single-value API).
 fn eval_scan(
     primitive: Primitive,
     inputs: &[Value],
@@ -405,23 +406,6 @@ fn eval_scan(
                 return Ok(init_carry.clone());
             }
 
-            // Compute the shape of each slice (drop leading axis)
-            let slice_shape = if t.shape.rank() == 1 {
-                // Vector: each slice is a scalar
-                None
-            } else {
-                // Higher-rank: each slice has shape dims[1..]
-                Some(Shape {
-                    dims: t.shape.dims[1..].into(),
-                })
-            };
-
-            let slice_size: usize = if let Some(ref s) = slice_shape {
-                s.dims.iter().map(|d| *d as usize).product()
-            } else {
-                1
-            };
-
             let mut carry = init_carry.clone();
             let indices: Vec<usize> = if reverse {
                 (0..leading_dim).rev().collect()
@@ -430,23 +414,117 @@ fn eval_scan(
             };
 
             for i in indices {
-                let start = i * slice_size;
-                let end = start + slice_size;
-                let slice_elements = t.elements[start..end].to_vec();
-
-                let x_slice = if let Some(ref s) = slice_shape {
-                    Value::Tensor(
-                        TensorValue::new(t.dtype, s.clone(), slice_elements)
-                            .map_err(EvalError::InvalidTensor)?,
-                    )
-                } else {
-                    Value::Scalar(slice_elements[0])
-                };
-
+                let x_slice = t.slice_axis0(i).map_err(EvalError::InvalidTensor)?;
                 carry = eval_primitive(body_op, &[carry, x_slice], &BTreeMap::new())?;
             }
 
             Ok(carry)
+        }
+    }
+}
+
+/// Evaluate scan with a functional body: `body_fn(carry, x_i) -> (new_carry, y_i)`.
+///
+/// This is the full JAX-compatible scan API:
+///   `scan(body_fn, init_carry, xs) -> (final_carry, stacked_ys)`
+///
+/// The body function receives the current carry and one slice of xs, and
+/// returns a new carry and an output value. Outputs are collected and stacked.
+///
+/// - `init_carry`: initial carry values (one or more)
+/// - `xs`: tensor to scan over (leading axis is iterated)
+/// - `body_fn`: `(carry_values, x_slice) -> (new_carry_values, output_values)`
+/// - `reverse`: if true, iterate xs in reverse order
+///
+/// Returns `(final_carry_values, stacked_ys)` where `stacked_ys` are stacked
+/// along a new leading axis.
+pub fn eval_scan_functional<B>(
+    init_carry: Vec<Value>,
+    xs: &Value,
+    mut body_fn: B,
+    reverse: bool,
+) -> Result<(Vec<Value>, Vec<Value>), EvalError>
+where
+    B: FnMut(Vec<Value>, Value) -> Result<(Vec<Value>, Vec<Value>), EvalError>,
+{
+    let slices = scan_extract_slices(xs)?;
+
+    if slices.is_empty() {
+        // Empty scan: return init carry, no outputs
+        return Ok((init_carry, vec![]));
+    }
+
+    let indices: Vec<usize> = if reverse {
+        (0..slices.len()).rev().collect()
+    } else {
+        (0..slices.len()).collect()
+    };
+
+    let mut carry = init_carry;
+    let mut per_output_values: Vec<Vec<Value>> = Vec::new();
+
+    for i in indices {
+        let x_slice = slices[i].clone();
+        let (new_carry, ys) = body_fn(carry, x_slice)?;
+        carry = new_carry;
+
+        // Initialize per-output collectors on first iteration
+        if per_output_values.is_empty() {
+            per_output_values = vec![Vec::with_capacity(slices.len()); ys.len()];
+        }
+
+        for (out_idx, y) in ys.into_iter().enumerate() {
+            if out_idx < per_output_values.len() {
+                per_output_values[out_idx].push(y);
+            }
+        }
+    }
+
+    // Stack each output along a new leading axis
+    let stacked_ys: Vec<Value> = per_output_values
+        .into_iter()
+        .map(|values| {
+            if values.is_empty() {
+                return Ok(Value::scalar_f64(0.0));
+            }
+            // Check if all values are scalars
+            let all_scalar = values.iter().all(|v| matches!(v, Value::Scalar(_)));
+            if all_scalar {
+                // Stack scalars into a vector
+                let elements: Vec<Literal> = values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Scalar(lit) => *lit,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                let dtype = Value::Scalar(elements[0]).dtype();
+                let len = elements.len() as u32;
+                TensorValue::new(dtype, Shape { dims: vec![len] }, elements)
+                    .map(Value::Tensor)
+                    .map_err(EvalError::InvalidTensor)
+            } else {
+                TensorValue::stack_axis0(&values)
+                    .map(Value::Tensor)
+                    .map_err(EvalError::InvalidTensor)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((carry, stacked_ys))
+}
+
+/// Extract per-element slices from the leading axis of a value.
+fn scan_extract_slices(xs: &Value) -> Result<Vec<Value>, EvalError> {
+    match xs {
+        Value::Scalar(_) => Ok(vec![xs.clone()]),
+        Value::Tensor(t) => {
+            let leading_dim = t.shape.dims[0] as usize;
+            let mut slices = Vec::with_capacity(leading_dim);
+            for i in 0..leading_dim {
+                slices.push(t.slice_axis0(i).map_err(EvalError::InvalidTensor)?);
+            }
+            Ok(slices)
         }
     }
 }
@@ -511,7 +589,14 @@ fn eval_while_loop(
         eval_primitive(body_op, &[carry, step_value.clone()], &BTreeMap::new())
     };
 
-    eval_while_loop_core(primitive, init_carry.clone(), &init_shape, max_iter, cond_fn, body_fn)
+    eval_while_loop_core(
+        primitive,
+        init_carry.clone(),
+        &init_shape,
+        max_iter,
+        cond_fn,
+        body_fn,
+    )
 }
 
 /// Evaluate a while loop with arbitrary condition and body functions.
@@ -3872,6 +3957,217 @@ mod tests {
         assert_eq!(out.as_f64_scalar().unwrap(), 42.0);
     }
 
+    // ── Scan functional tests (bd-3eyv) ──────────────────────────────
+
+    #[test]
+    fn test_scan_accumulate_sum() {
+        // scan(add, init=0, xs=[1,2,3,4]) → carry=10, ys=[1,3,6,10]
+        let init = vec![Value::scalar_f64(0.0)];
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let (carry, ys) = super::eval_scan_functional(
+            init,
+            &xs,
+            |c, x| {
+                let new_carry =
+                    eval_primitive(Primitive::Add, &[c[0].clone(), x], &BTreeMap::new())?;
+                Ok((vec![new_carry.clone()], vec![new_carry]))
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(carry[0].as_f64_scalar().unwrap(), 10.0);
+        assert_eq!(ys.len(), 1);
+        let ys_tensor = ys[0].as_tensor().expect("ys should be tensor");
+        let ys_vals = ys_tensor.to_f64_vec().unwrap();
+        assert_eq!(ys_vals, vec![1.0, 3.0, 6.0, 10.0]);
+    }
+
+    #[test]
+    fn test_scan_accumulate_product() {
+        // scan(mul, init=1, xs=[1,2,3,4]) → carry=24, ys=[1,2,6,24]
+        let init = vec![Value::scalar_f64(1.0)];
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let (carry, ys) = super::eval_scan_functional(
+            init,
+            &xs,
+            |c, x| {
+                let new_carry =
+                    eval_primitive(Primitive::Mul, &[c[0].clone(), x], &BTreeMap::new())?;
+                Ok((vec![new_carry.clone()], vec![new_carry]))
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(carry[0].as_f64_scalar().unwrap(), 24.0);
+        let ys_vals = ys[0].as_tensor().unwrap().to_f64_vec().unwrap();
+        assert_eq!(ys_vals, vec![1.0, 2.0, 6.0, 24.0]);
+    }
+
+    #[test]
+    fn test_scan_custom_body() {
+        // Custom body: carry = carry + x * 2
+        let init = vec![Value::scalar_f64(0.0)];
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let (carry, ys) = super::eval_scan_functional(
+            init,
+            &xs,
+            |c, x| {
+                let doubled = eval_primitive(
+                    Primitive::Mul,
+                    &[x, Value::scalar_f64(2.0)],
+                    &BTreeMap::new(),
+                )?;
+                let new_carry =
+                    eval_primitive(Primitive::Add, &[c[0].clone(), doubled], &BTreeMap::new())?;
+                Ok((vec![new_carry.clone()], vec![new_carry]))
+            },
+            false,
+        )
+        .unwrap();
+        // 0 + 1*2 = 2, 2 + 2*2 = 6, 6 + 3*2 = 12
+        assert_eq!(carry[0].as_f64_scalar().unwrap(), 12.0);
+        let ys_vals = ys[0].as_tensor().unwrap().to_f64_vec().unwrap();
+        assert_eq!(ys_vals, vec![2.0, 6.0, 12.0]);
+    }
+
+    #[test]
+    fn test_scan_multi_carry() {
+        // Multi-carry: (count, sum). Body: count += 1, sum += x
+        let init = vec![Value::scalar_f64(0.0), Value::scalar_f64(0.0)];
+        let xs = Value::vector_f64(&[10.0, 20.0, 30.0]).unwrap();
+        let (carry, ys) = super::eval_scan_functional(
+            init,
+            &xs,
+            |c, x| {
+                let new_count = eval_primitive(
+                    Primitive::Add,
+                    &[c[0].clone(), Value::scalar_f64(1.0)],
+                    &BTreeMap::new(),
+                )?;
+                let new_sum =
+                    eval_primitive(Primitive::Add, &[c[1].clone(), x.clone()], &BTreeMap::new())?;
+                Ok((vec![new_count, new_sum], vec![x]))
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(carry[0].as_f64_scalar().unwrap(), 3.0); // count
+        assert_eq!(carry[1].as_f64_scalar().unwrap(), 60.0); // sum
+        let ys_vals = ys[0].as_tensor().unwrap().to_f64_vec().unwrap();
+        assert_eq!(ys_vals, vec![10.0, 20.0, 30.0]); // identity output
+    }
+
+    #[test]
+    fn test_scan_no_output() {
+        // Scan that only accumulates carry, no per-step output
+        let init = vec![Value::scalar_f64(0.0)];
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let (carry, ys) = super::eval_scan_functional(
+            init,
+            &xs,
+            |c, x| {
+                let new_carry =
+                    eval_primitive(Primitive::Add, &[c[0].clone(), x], &BTreeMap::new())?;
+                Ok((vec![new_carry], vec![]))
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(carry[0].as_f64_scalar().unwrap(), 6.0);
+        assert!(ys.is_empty());
+    }
+
+    #[test]
+    fn test_scan_empty_xs() {
+        // Scan over empty array → carry = init, ys = empty
+        let init = vec![Value::scalar_f64(42.0)];
+        let xs =
+            Value::Tensor(TensorValue::new(DType::F64, Shape { dims: vec![0] }, vec![]).unwrap());
+        let (carry, ys) = super::eval_scan_functional(
+            init,
+            &xs,
+            |c, x| {
+                let new_carry =
+                    eval_primitive(Primitive::Add, &[c[0].clone(), x], &BTreeMap::new())?;
+                Ok((vec![new_carry.clone()], vec![new_carry]))
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(carry[0].as_f64_scalar().unwrap(), 42.0);
+        assert!(ys.is_empty());
+    }
+
+    #[test]
+    fn test_scan_single_element() {
+        // Scan over single-element array
+        let init = vec![Value::scalar_f64(5.0)];
+        let xs = Value::vector_f64(&[3.0]).unwrap();
+        let (carry, ys) = super::eval_scan_functional(
+            init,
+            &xs,
+            |c, x| {
+                let new_carry =
+                    eval_primitive(Primitive::Add, &[c[0].clone(), x], &BTreeMap::new())?;
+                Ok((vec![new_carry.clone()], vec![new_carry]))
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(carry[0].as_f64_scalar().unwrap(), 8.0);
+        let ys_vals = ys[0].as_tensor().unwrap().to_f64_vec().unwrap();
+        assert_eq!(ys_vals, vec![8.0]);
+    }
+
+    #[test]
+    fn test_scan_tensor_carry() {
+        // Scan with rank-2 tensor as carry
+        // carry is [2] vector, xs is [3] vector, body: carry = carry + [x, x]
+        let init = vec![Value::vector_f64(&[0.0, 0.0]).unwrap()];
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let (carry, _ys) = super::eval_scan_functional(
+            init,
+            &xs,
+            |c, x| {
+                // Build a [2] tensor from the scalar x
+                let x_val = x.as_f64_scalar().unwrap();
+                let x_vec = Value::vector_f64(&[x_val, x_val]).unwrap();
+                let new_carry =
+                    eval_primitive(Primitive::Add, &[c[0].clone(), x_vec], &BTreeMap::new())?;
+                Ok((vec![new_carry], vec![]))
+            },
+            false,
+        )
+        .unwrap();
+        // carry should be [0+1+2+3, 0+1+2+3] = [6, 6]
+        let carry_tensor = carry[0].as_tensor().unwrap();
+        let carry_vals = carry_tensor.to_f64_vec().unwrap();
+        assert_eq!(carry_vals, vec![6.0, 6.0]);
+    }
+
+    #[test]
+    fn test_scan_reverse() {
+        // scan(add, init=0, xs=[1,2,3], reverse=true) → iterate 3,2,1
+        // ys=[3, 5, 6] (cumsum from reverse)
+        let init = vec![Value::scalar_f64(0.0)];
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let (carry, ys) = super::eval_scan_functional(
+            init,
+            &xs,
+            |c, x| {
+                let new_carry =
+                    eval_primitive(Primitive::Add, &[c[0].clone(), x], &BTreeMap::new())?;
+                Ok((vec![new_carry.clone()], vec![new_carry]))
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(carry[0].as_f64_scalar().unwrap(), 6.0);
+        let ys_vals = ys[0].as_tensor().unwrap().to_f64_vec().unwrap();
+        // Reverse: 0+3=3, 3+2=5, 5+1=6
+        assert_eq!(ys_vals, vec![3.0, 5.0, 6.0]);
+    }
+
     // ── While loop tests ────────────────────────────────────────────
 
     fn while_params(body_op: &str, cond_op: &str) -> BTreeMap<String, String> {
@@ -4046,9 +4342,7 @@ mod tests {
             &while_params_max("add", "lt", 5),
         );
         match result {
-            Err(super::EvalError::MaxIterationsExceeded {
-                max_iterations, ..
-            }) => {
+            Err(super::EvalError::MaxIterationsExceeded { max_iterations, .. }) => {
                 assert_eq!(max_iterations, 5);
             }
             other => panic!("expected MaxIterationsExceeded, got {other:?}"),

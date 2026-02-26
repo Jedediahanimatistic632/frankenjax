@@ -429,9 +429,7 @@ fn execute_with_transforms(
     match head {
         Transform::Jit => unreachable!("Jit transforms were skipped above"),
         Transform::Grad => execute_grad(root_jaxpr, tail, args, backend, device),
-        Transform::Vmap => {
-            execute_vmap(root_jaxpr, tail, args, backend, device, compile_options)
-        }
+        Transform::Vmap => execute_vmap(root_jaxpr, tail, args, backend, device, compile_options),
     }
 }
 
@@ -540,12 +538,12 @@ fn execute_vmap(
             match arg {
                 Value::Tensor(tensor) => {
                     let rank = tensor.rank();
-                    let resolved = axis_spec
-                        .resolve(rank)
-                        .ok_or(TransformExecutionError::VmapAxesOutOfBounds {
+                    let resolved = axis_spec.resolve(rank).ok_or(
+                        TransformExecutionError::VmapAxesOutOfBounds {
                             axis: *axis,
                             ndim: rank,
-                        })?;
+                        },
+                    )?;
                     if resolved >= rank {
                         return Err(TransformExecutionError::VmapAxesOutOfBounds {
                             axis: *axis,
@@ -556,13 +554,11 @@ fn execute_vmap(
                     let dim_size = tensor.shape.dims[resolved] as usize;
                     if let Some(expected) = batch_size {
                         if dim_size != expected {
-                            return Err(
-                                TransformExecutionError::VmapMismatchedLeadingDimension {
-                                    expected,
-                                    actual: dim_size,
-                                }
-                                .into(),
-                            );
+                            return Err(TransformExecutionError::VmapMismatchedLeadingDimension {
+                                expected,
+                                actual: dim_size,
+                            }
+                            .into());
                         }
                     } else {
                         batch_size = Some(dim_size);
@@ -570,9 +566,7 @@ fn execute_vmap(
                 }
                 Value::Scalar(_) => {
                     // Scalar with batched axis is invalid
-                    return Err(
-                        TransformExecutionError::VmapRequiresRankOneLeadingArgument.into()
-                    );
+                    return Err(TransformExecutionError::VmapRequiresRankOneLeadingArgument.into());
                 }
             }
         }
@@ -585,7 +579,9 @@ fn execute_vmap(
 
     // Use BatchTrace interpreter when no tail transforms exist and all batched
     // args use axis 0 (the default case).
-    let all_axis_zero = in_axes.iter().all(|spec| matches!(spec, AxisSpec::Batched(0) | AxisSpec::NotBatched));
+    let all_axis_zero = in_axes
+        .iter()
+        .all(|spec| matches!(spec, AxisSpec::Batched(0) | AxisSpec::NotBatched));
     if tail.is_empty() && all_axis_zero && !compile_options.contains_key("vmap_out_axes") {
         return execute_vmap_batch_trace(root_jaxpr, args, &in_axes);
     }
@@ -658,6 +654,7 @@ fn execute_vmap_batch_trace(
 }
 
 /// Loop-and-stack vmap fallback for composed transforms (e.g., vmap(grad(f))).
+#[allow(clippy::too_many_arguments)]
 fn execute_vmap_loop_and_stack(
     root_jaxpr: &Jaxpr,
     tail: &[Transform],
@@ -684,13 +681,9 @@ fn execute_vmap_loop_and_stack(
                         Value::Tensor(tensor) => {
                             let resolved_axis = axis_spec.resolve(tensor.rank()).unwrap_or(0);
                             if resolved_axis == 0 {
-                                mapped_args.push(
-                                    tensor
-                                        .slice_axis0(index)
-                                        .map_err(|err| {
-                                            TransformExecutionError::TensorBuild(err.to_string())
-                                        })?,
-                                );
+                                mapped_args.push(tensor.slice_axis0(index).map_err(|err| {
+                                    TransformExecutionError::TensorBuild(err.to_string())
+                                })?);
                             } else {
                                 // For non-zero axes, we need to slice along that axis
                                 let sliced = slice_along_axis(tensor, resolved_axis, index)
@@ -727,7 +720,10 @@ fn execute_vmap_loop_and_stack(
 
     let mut outputs = Vec::with_capacity(per_output_values.len());
     for (out_idx, values) in per_output_values.iter().enumerate() {
-        let out_axis = out_axes.get(out_idx).copied().unwrap_or(AxisSpec::Batched(0));
+        let out_axis = out_axes
+            .get(out_idx)
+            .copied()
+            .unwrap_or(AxisSpec::Batched(0));
         let tensor = TensorValue::stack_axis0(values)
             .map_err(|err| TransformExecutionError::TensorBuild(err.to_string()))?;
         match out_axis {
@@ -772,11 +768,7 @@ fn execute_vmap_loop_and_stack(
 }
 
 /// Slice a tensor along an arbitrary axis, extracting the `index`-th slice.
-fn slice_along_axis(
-    tensor: &TensorValue,
-    axis: usize,
-    index: usize,
-) -> Result<Value, String> {
+fn slice_along_axis(tensor: &TensorValue, axis: usize, index: usize) -> Result<Value, String> {
     let rank = tensor.rank();
     if axis >= rank {
         return Err(format!(
@@ -1775,5 +1767,319 @@ mod tests {
         assert!((vals[0] - 1.0).abs() < 1e-10, "1^2 = 1");
         assert!((vals[1] - 16.0).abs() < 1e-10, "4^2 = 16");
         assert!((vals[2] - 81.0).abs() < 1e-10, "9^2 = 81");
+    }
+
+    // ── in_axes / out_axes tests (bd-3edr) ───────────────────────
+
+    #[test]
+    fn test_in_axes_0_default() {
+        // in_axes=0 (default) batches along leading dim — same as no compile_options
+        let input = Value::vector_i64(&[10, 20, 30]).expect("vector");
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_in_axes".to_owned(), "0".to_owned());
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap]),
+            args: vec![input],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap in_axes=0 should succeed");
+
+        let output = response.outputs[0].as_tensor().expect("tensor");
+        let vals: Vec<i64> = output
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        assert_eq!(vals, vec![11, 21, 31]);
+    }
+
+    #[test]
+    fn test_in_axes_none_broadcasts() {
+        // in_axes=None means input is not batched — broadcast to all batch elements.
+        // We use Add2 with two args: first batched (axis 0), second not batched.
+        let batched = Value::vector_i64(&[1, 2, 3]).expect("vector");
+        let scalar = Value::scalar_i64(100);
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_in_axes".to_owned(), "0,none".to_owned());
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Add2, &[Transform::Vmap]),
+            args: vec![batched, scalar],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap with in_axes=none broadcast should succeed");
+
+        let output = response.outputs[0].as_tensor().expect("tensor");
+        let vals: Vec<i64> = output
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        assert_eq!(vals, vec![101, 102, 103]);
+    }
+
+    #[test]
+    fn test_in_axes_1_second_dim() {
+        // in_axes=1 batches along second dimension.
+        // Input shape [2, 3]: batch along axis 1 gives batch_size=3, each slice is [2].
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    fj_core::Literal::I64(1),
+                    fj_core::Literal::I64(2),
+                    fj_core::Literal::I64(3),
+                    fj_core::Literal::I64(4),
+                    fj_core::Literal::I64(5),
+                    fj_core::Literal::I64(6),
+                ],
+            )
+            .expect("matrix"),
+        );
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_in_axes".to_owned(), "1".to_owned());
+        // Force loop-and-stack path by adding Jit tail
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap, Transform::Jit]),
+            args: vec![matrix],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap in_axes=1 should succeed");
+
+        let output = response.outputs[0].as_tensor().expect("tensor");
+        // Batch size 3, each inner result is [2], stacked along axis 0 → [3, 2]
+        assert_eq!(output.shape, Shape { dims: vec![3, 2] });
+        let vals: Vec<i64> = output
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        // Column 0: [1, 4]+1 = [2, 5], Column 1: [2, 5]+1 = [3, 6], Column 2: [3, 6]+1 = [4, 7]
+        assert_eq!(vals, vec![2, 5, 3, 6, 4, 7]);
+    }
+
+    #[test]
+    fn test_in_axes_tuple_mixed() {
+        // in_axes=(0, none) for two-arg Add2: first arg batched, second broadcast
+        let batched = Value::vector_f64(&[1.0, 2.0, 3.0]).expect("vector");
+        let broadcast = Value::scalar_f64(10.0);
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_in_axes".to_owned(), "0,none".to_owned());
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Add2, &[Transform::Vmap]),
+            args: vec![batched, broadcast],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap mixed in_axes should succeed");
+
+        let output = response.outputs[0].as_tensor().expect("tensor");
+        let vals = output.to_f64_vec().expect("f64");
+        assert!((vals[0] - 11.0).abs() < 1e-10);
+        assert!((vals[1] - 12.0).abs() < 1e-10);
+        assert!((vals[2] - 13.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_out_axes_0_default() {
+        // out_axes=0 (default) places batch dim at position 0 — same as normal
+        let input = Value::vector_i64(&[1, 2, 3]).expect("vector");
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_out_axes".to_owned(), "0".to_owned());
+        // Force loop-and-stack by adding Jit tail
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap, Transform::Jit]),
+            args: vec![input],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap out_axes=0 should succeed");
+
+        let output = response.outputs[0].as_tensor().expect("tensor");
+        let vals: Vec<i64> = output
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        assert_eq!(vals, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn test_out_axes_1_trailing() {
+        // out_axes=1: batch dim moved from position 0 to position 1.
+        // vmap(AddOne) on [3] vector: inner outputs are scalars, stacked to [3].
+        // out_axes=1 on a 1D output [3] has resolved=1 >= rank=1, so it stays as-is.
+        // Use a matrix input for a meaningful test:
+        // Input [3, 2], in_axes=0 → inner gets [2], outputs [2], stacked → [3, 2]
+        // out_axes=1 → transpose to [2, 3]
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![3, 2] },
+                (1..=6).map(fj_core::Literal::I64).collect(),
+            )
+            .expect("matrix"),
+        );
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_out_axes".to_owned(), "1".to_owned());
+        // Force loop-and-stack
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap, Transform::Jit]),
+            args: vec![matrix],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap out_axes=1 should succeed");
+
+        let output = response.outputs[0].as_tensor().expect("tensor");
+        // Original stacked: [3, 2] with batch dim at 0
+        // out_axes=1 → transpose [0,1] → [1,0] → shape [2, 3]
+        assert_eq!(output.shape, Shape { dims: vec![2, 3] });
+        // Original elements row-major: [2,3, 4,5, 6,7]
+        // Transposed [2,3] row-major: col0=[2,4,6], col1=[3,5,7]
+        let vals: Vec<i64> = output
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        assert_eq!(vals, vec![2, 4, 6, 3, 5, 7]);
+    }
+
+    #[test]
+    fn test_in_axes_negative_index() {
+        // in_axes=-1 on a [2, 3] matrix means batch along last axis (axis 1), batch_size=3
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                (1..=6).map(fj_core::Literal::I64).collect(),
+            )
+            .expect("matrix"),
+        );
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_in_axes".to_owned(), "-1".to_owned());
+        // Force loop-and-stack
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap, Transform::Jit]),
+            args: vec![matrix],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap in_axes=-1 should succeed");
+
+        let output = response.outputs[0].as_tensor().expect("tensor");
+        // in_axes=-1 on [2,3] resolves to axis 1, batch_size=3
+        // Each slice is column [2], stacked → [3, 2]
+        assert_eq!(output.shape, Shape { dims: vec![3, 2] });
+    }
+
+    #[test]
+    fn test_in_axes_error_out_of_bounds() {
+        // in_axes=5 on a rank-2 tensor should error
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                (1..=6).map(fj_core::Literal::I64).collect(),
+            )
+            .expect("matrix"),
+        );
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_in_axes".to_owned(), "5".to_owned());
+        let err = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap]),
+            args: vec![matrix],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect_err("vmap with out-of-bounds in_axes should fail");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("out of bounds"),
+            "error should mention out of bounds, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_in_axes_error_mismatched_batch_size() {
+        // Two batched args with different batch sizes along their respective axes
+        let a = Value::vector_i64(&[1, 2, 3]).expect("vec3");
+        let b = Value::vector_i64(&[1, 2]).expect("vec2");
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_in_axes".to_owned(), "0,0".to_owned());
+        let err = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Add2, &[Transform::Vmap]),
+            args: vec![a, b],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect_err("mismatched batch sizes should fail");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mismatch"),
+            "error should mention mismatch, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_parse_vmap_in_axes_uniform() {
+        let opts = BTreeMap::new();
+        let axes = super::parse_vmap_in_axes(&opts, 3);
+        assert_eq!(axes, vec![super::AxisSpec::Batched(0); 3]);
+    }
+
+    #[test]
+    fn test_parse_vmap_in_axes_per_arg() {
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_in_axes".to_owned(), "0,none,1".to_owned());
+        let axes = super::parse_vmap_in_axes(&opts, 3);
+        assert_eq!(
+            axes,
+            vec![
+                super::AxisSpec::Batched(0),
+                super::AxisSpec::NotBatched,
+                super::AxisSpec::Batched(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_vmap_out_axes_broadcast_single() {
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_out_axes".to_owned(), "1".to_owned());
+        let axes = super::parse_vmap_out_axes(&opts, 3);
+        assert_eq!(axes, vec![super::AxisSpec::Batched(1); 3]);
     }
 }

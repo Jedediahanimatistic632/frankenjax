@@ -2784,6 +2784,24 @@ fn jvp_rule(primitive: Primitive, primals: &[Value], tangents: &[f64]) -> Result
                 Ok(tangents[0])
             }
         }
+        // Switch JVP: tangent from the selected branch, zero for others.
+        Primitive::Switch => {
+            // tangents[0] is for the index (integer, no tangent), rest are branch inputs
+            if tangents.len() > 1 {
+                // Select the tangent corresponding to the active branch
+                let idx = inputs[0].as_i64_scalar().unwrap_or(0) as usize;
+                let branch_idx = idx + 1; // offset past the index input
+                if branch_idx < tangents.len() {
+                    Ok(tangents[branch_idx])
+                } else {
+                    Ok(tangents[1])
+                }
+            } else if !tangents.is_empty() {
+                Ok(tangents[0])
+            } else {
+                Ok(0.0)
+            }
+        }
         // Bitwise ops: not differentiable, tangent is zero.
         Primitive::BitwiseAnd
         | Primitive::BitwiseOr

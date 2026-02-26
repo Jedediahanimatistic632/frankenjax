@@ -881,6 +881,53 @@ pub enum ProgramSpec {
     CosX,
     Dot3,
     ReduceSumVec,
+    // Lax unary primitives (scalar → scalar)
+    LaxNeg,
+    LaxAbs,
+    LaxExp,
+    LaxLog,
+    LaxSqrt,
+    LaxRsqrt,
+    LaxFloor,
+    LaxCeil,
+    LaxRound,
+    LaxTan,
+    LaxAsin,
+    LaxAcos,
+    LaxAtan,
+    LaxSinh,
+    LaxCosh,
+    LaxTanh,
+    LaxExpm1,
+    LaxLog1p,
+    LaxSign,
+    LaxSquare,
+    LaxReciprocal,
+    LaxLogistic,
+    LaxErf,
+    LaxErfc,
+    // Lax binary primitives (scalar, scalar → scalar)
+    LaxSub,
+    LaxMul,
+    LaxDiv,
+    LaxRem,
+    LaxPow,
+    LaxAtan2,
+    LaxMax,
+    LaxMin,
+    LaxEq,
+    LaxNe,
+    LaxLt,
+    LaxLe,
+    LaxGt,
+    LaxGe,
+    // Lax ternary primitives
+    LaxSelect,
+    LaxClamp,
+    // Lax reduction primitives (vector → scalar)
+    LaxReduceMax,
+    LaxReduceMin,
+    LaxReduceProd,
 }
 
 #[must_use]
@@ -950,55 +997,107 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                 sub_jaxprs: vec![],
             }],
         ),
-        ProgramSpec::SinX => Jaxpr::new(
-            vec![VarId(1)],
-            vec![],
-            vec![VarId(2)],
-            vec![Equation {
-                primitive: Primitive::Sin,
-                inputs: smallvec![Atom::Var(VarId(1))],
-                outputs: smallvec![VarId(2)],
-                params: BTreeMap::new(),
-                sub_jaxprs: vec![],
-            }],
-        ),
-        ProgramSpec::CosX => Jaxpr::new(
-            vec![VarId(1)],
-            vec![],
-            vec![VarId(2)],
-            vec![Equation {
-                primitive: Primitive::Cos,
-                inputs: smallvec![Atom::Var(VarId(1))],
-                outputs: smallvec![VarId(2)],
-                params: BTreeMap::new(),
-                sub_jaxprs: vec![],
-            }],
-        ),
-        ProgramSpec::Dot3 => Jaxpr::new(
-            vec![VarId(1), VarId(2)],
-            vec![],
-            vec![VarId(3)],
-            vec![Equation {
-                primitive: Primitive::Dot,
-                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
-                outputs: smallvec![VarId(3)],
-                params: BTreeMap::new(),
-                sub_jaxprs: vec![],
-            }],
-        ),
-        ProgramSpec::ReduceSumVec => Jaxpr::new(
-            vec![VarId(1)],
-            vec![],
-            vec![VarId(2)],
-            vec![Equation {
-                primitive: Primitive::ReduceSum,
-                inputs: smallvec![Atom::Var(VarId(1))],
-                outputs: smallvec![VarId(2)],
-                params: BTreeMap::new(),
-                sub_jaxprs: vec![],
-            }],
-        ),
+        ProgramSpec::SinX => unary_program(Primitive::Sin),
+        ProgramSpec::CosX => unary_program(Primitive::Cos),
+        ProgramSpec::Dot3 => binary_program(Primitive::Dot),
+        ProgramSpec::ReduceSumVec => unary_program(Primitive::ReduceSum),
+        // Lax unary
+        ProgramSpec::LaxNeg => unary_program(Primitive::Neg),
+        ProgramSpec::LaxAbs => unary_program(Primitive::Abs),
+        ProgramSpec::LaxExp => unary_program(Primitive::Exp),
+        ProgramSpec::LaxLog => unary_program(Primitive::Log),
+        ProgramSpec::LaxSqrt => unary_program(Primitive::Sqrt),
+        ProgramSpec::LaxRsqrt => unary_program(Primitive::Rsqrt),
+        ProgramSpec::LaxFloor => unary_program(Primitive::Floor),
+        ProgramSpec::LaxCeil => unary_program(Primitive::Ceil),
+        ProgramSpec::LaxRound => unary_program(Primitive::Round),
+        ProgramSpec::LaxTan => unary_program(Primitive::Tan),
+        ProgramSpec::LaxAsin => unary_program(Primitive::Asin),
+        ProgramSpec::LaxAcos => unary_program(Primitive::Acos),
+        ProgramSpec::LaxAtan => unary_program(Primitive::Atan),
+        ProgramSpec::LaxSinh => unary_program(Primitive::Sinh),
+        ProgramSpec::LaxCosh => unary_program(Primitive::Cosh),
+        ProgramSpec::LaxTanh => unary_program(Primitive::Tanh),
+        ProgramSpec::LaxExpm1 => unary_program(Primitive::Expm1),
+        ProgramSpec::LaxLog1p => unary_program(Primitive::Log1p),
+        ProgramSpec::LaxSign => unary_program(Primitive::Sign),
+        ProgramSpec::LaxSquare => unary_program(Primitive::Square),
+        ProgramSpec::LaxReciprocal => unary_program(Primitive::Reciprocal),
+        ProgramSpec::LaxLogistic => unary_program(Primitive::Logistic),
+        ProgramSpec::LaxErf => unary_program(Primitive::Erf),
+        ProgramSpec::LaxErfc => unary_program(Primitive::Erfc),
+        // Lax binary
+        ProgramSpec::LaxSub => binary_program(Primitive::Sub),
+        ProgramSpec::LaxMul => binary_program(Primitive::Mul),
+        ProgramSpec::LaxDiv => binary_program(Primitive::Div),
+        ProgramSpec::LaxRem => binary_program(Primitive::Rem),
+        ProgramSpec::LaxPow => binary_program(Primitive::Pow),
+        ProgramSpec::LaxAtan2 => binary_program(Primitive::Atan2),
+        ProgramSpec::LaxMax => binary_program(Primitive::Max),
+        ProgramSpec::LaxMin => binary_program(Primitive::Min),
+        ProgramSpec::LaxEq => binary_program(Primitive::Eq),
+        ProgramSpec::LaxNe => binary_program(Primitive::Ne),
+        ProgramSpec::LaxLt => binary_program(Primitive::Lt),
+        ProgramSpec::LaxLe => binary_program(Primitive::Le),
+        ProgramSpec::LaxGt => binary_program(Primitive::Gt),
+        ProgramSpec::LaxGe => binary_program(Primitive::Ge),
+        // Lax ternary
+        ProgramSpec::LaxSelect => ternary_program(Primitive::Select),
+        ProgramSpec::LaxClamp => ternary_program(Primitive::Clamp),
+        // Lax reduction
+        ProgramSpec::LaxReduceMax => unary_program(Primitive::ReduceMax),
+        ProgramSpec::LaxReduceMin => unary_program(Primitive::ReduceMin),
+        ProgramSpec::LaxReduceProd => unary_program(Primitive::ReduceProd),
     }
+}
+
+fn unary_program(primitive: Primitive) -> Jaxpr {
+    Jaxpr::new(
+        vec![VarId(1)],
+        vec![],
+        vec![VarId(2)],
+        vec![Equation {
+            primitive,
+            inputs: smallvec![Atom::Var(VarId(1))],
+            outputs: smallvec![VarId(2)],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+        }],
+    )
+}
+
+fn binary_program(primitive: Primitive) -> Jaxpr {
+    Jaxpr::new(
+        vec![VarId(1), VarId(2)],
+        vec![],
+        vec![VarId(3)],
+        vec![Equation {
+            primitive,
+            inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+            outputs: smallvec![VarId(3)],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+        }],
+    )
+}
+
+fn ternary_program(primitive: Primitive) -> Jaxpr {
+    Jaxpr::new(
+        vec![VarId(1), VarId(2), VarId(3)],
+        vec![],
+        vec![VarId(4)],
+        vec![Equation {
+            primitive,
+            inputs: smallvec![
+                Atom::Var(VarId(1)),
+                Atom::Var(VarId(2)),
+                Atom::Var(VarId(3))
+            ],
+            outputs: smallvec![VarId(4)],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+        }],
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

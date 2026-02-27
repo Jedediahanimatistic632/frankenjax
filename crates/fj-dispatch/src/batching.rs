@@ -352,7 +352,10 @@ pub fn apply_batch_rule(
         | Primitive::Reciprocal
         | Primitive::Logistic
         | Primitive::Erf
-        | Primitive::Erfc => batch_unary_elementwise(primitive, inputs, params),
+        | Primitive::Erfc
+        | Primitive::Cbrt
+        | Primitive::IsFinite
+        | Primitive::IntegerPow => batch_unary_elementwise(primitive, inputs, params),
 
         // ── Binary elementwise ─────────────────────────────────
         Primitive::Add
@@ -363,7 +366,8 @@ pub fn apply_batch_rule(
         | Primitive::Pow
         | Primitive::Div
         | Primitive::Rem
-        | Primitive::Atan2 => batch_binary_elementwise(primitive, inputs, params),
+        | Primitive::Atan2
+        | Primitive::Nextafter => batch_binary_elementwise(primitive, inputs, params),
 
         // ── Comparison ─────────────────────────────────────────
         Primitive::Eq
@@ -413,6 +417,10 @@ pub fn apply_batch_rule(
         Primitive::DynamicUpdateSlice => batch_passthrough_leading(primitive, inputs, params),
         Primitive::Gather => batch_passthrough_leading(primitive, inputs, params),
         Primitive::Scatter => batch_passthrough_leading(primitive, inputs, params),
+        Primitive::Rev => batch_passthrough_leading(primitive, inputs, params),
+        Primitive::Squeeze => batch_passthrough_leading(primitive, inputs, params),
+        Primitive::Split => batch_passthrough_leading(primitive, inputs, params),
+        Primitive::ExpandDims => batch_passthrough_leading(primitive, inputs, params),
 
         // ── Index generation ───────────────────────────────────
         Primitive::Iota => batch_iota(inputs, params),
@@ -431,7 +439,7 @@ pub fn apply_batch_rule(
 
         // ── Control flow ───────────────────────────────────────
         // Control flow batching is complex — fall back to loop-and-stack
-        Primitive::Cond | Primitive::Scan | Primitive::While => {
+        Primitive::Cond | Primitive::Scan | Primitive::While | Primitive::Switch => {
             batch_control_flow_fallback(primitive, inputs, params)
         }
 

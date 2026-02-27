@@ -4,7 +4,9 @@
 
 use fj_core::{Atom, DType, Equation, Jaxpr, Primitive, Shape, Value, VarId};
 use smallvec::SmallVec;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TracerId(pub u32);
@@ -451,11 +453,36 @@ impl SimpleTraceContext {
             | Primitive::Reciprocal
             | Primitive::Logistic
             | Primitive::Erf
-            | Primitive::Erfc => {
+            | Primitive::Erfc
+            | Primitive::Cbrt
+            | Primitive::IntegerPow => {
                 if inputs.len() != 1 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
                         detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![inputs[0].clone()])
+            }
+            // IsFinite: same shape, output dtype is Bool
+            Primitive::IsFinite => {
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![ShapedArray {
+                    dtype: DType::Bool,
+                    shape: inputs[0].shape.clone(),
+                }])
+            }
+            // Nextafter: binary, same shape as inputs
+            Primitive::Nextafter => {
+                if inputs.len() != 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 2 inputs, got {}", inputs.len()),
                     });
                 }
                 Ok(vec![inputs[0].clone()])
@@ -494,6 +521,101 @@ impl SimpleTraceContext {
             }
             Primitive::Concatenate => infer_concatenate(inputs, params),
             Primitive::Pad => infer_pad(inputs, params),
+            Primitive::Rev => {
+                // Rev preserves shape
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![inputs[0].clone()])
+            }
+            Primitive::Squeeze => {
+                // Squeeze removes specified singleton dimensions
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                let dims = &inputs[0].shape.dims;
+                let squeeze_dims: Vec<usize> = if let Some(raw) = params.get("dimensions") {
+                    raw.split(',')
+                        .map(|s| s.trim().parse::<usize>().unwrap_or(0))
+                        .collect()
+                } else {
+                    dims.iter()
+                        .enumerate()
+                        .filter(|&(_, &d)| d == 1)
+                        .map(|(i, _)| i)
+                        .collect()
+                };
+                let new_dims: Vec<u32> = dims
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !squeeze_dims.contains(i))
+                    .map(|(_, &d)| d)
+                    .collect();
+                Ok(vec![ShapedArray {
+                    dtype: inputs[0].dtype,
+                    shape: Shape { dims: new_dims },
+                }])
+            }
+            Primitive::Split => {
+                // Split along axis: output has extra leading dim
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                let axis: usize = params
+                    .get("axis")
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
+                let dims = &inputs[0].shape.dims;
+                let num_sections: usize = if let Some(raw) = params.get("num_sections") {
+                    raw.trim().parse().unwrap_or(1)
+                } else if let Some(raw) = params.get("sizes") {
+                    raw.split(',').count()
+                } else {
+                    1
+                };
+                let section_size = dims[axis] as usize / num_sections;
+                let mut new_dims = Vec::with_capacity(dims.len() + 1);
+                for (i, &d) in dims.iter().enumerate() {
+                    if i == axis {
+                        new_dims.push(num_sections as u32);
+                        new_dims.push(section_size as u32);
+                    } else {
+                        new_dims.push(d);
+                    }
+                }
+                Ok(vec![ShapedArray {
+                    dtype: inputs[0].dtype,
+                    shape: Shape { dims: new_dims },
+                }])
+            }
+            Primitive::ExpandDims => {
+                // ExpandDims inserts a size-1 dim at the given axis
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                let axis: usize = params
+                    .get("axis")
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
+                let mut new_dims = inputs[0].shape.dims.clone();
+                new_dims.insert(axis, 1);
+                Ok(vec![ShapedArray {
+                    dtype: inputs[0].dtype,
+                    shape: Shape { dims: new_dims },
+                }])
+            }
             Primitive::DynamicSlice => {
                 // Output shape = slice_sizes param
                 if inputs.is_empty() {
@@ -721,6 +843,25 @@ impl SimpleTraceContext {
                 Ok(vec![ShapedArray {
                     dtype: init_carry.dtype,
                     shape: init_carry.shape.clone(),
+                }])
+            }
+
+            Primitive::Switch => {
+                // Switch: inputs are [index, branch0_val, branch1_val, ...]
+                // Output shape = shape of first branch value (all branches must match)
+                if inputs.len() < 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "switch expects at least 2 inputs (index + branch), got {}",
+                            inputs.len()
+                        ),
+                    });
+                }
+                let branch = &inputs[1];
+                Ok(vec![ShapedArray {
+                    dtype: branch.dtype,
+                    shape: branch.shape.clone(),
                 }])
             }
 
@@ -1732,6 +1873,267 @@ fn parse_i64_list(
         .collect()
 }
 
+// ── make_jaxpr: Trace Rust closures into Jaxpr ────────────────────
+
+/// A tracer reference that records primitive operations into a shared trace context.
+///
+/// Supports operator overloading (Add, Sub, Mul, Neg) so users can write
+/// natural mathematical expressions that get traced into a Jaxpr.
+#[derive(Clone)]
+pub struct TracerRef {
+    id: TracerId,
+    aval: ShapedArray,
+    ctx: Rc<RefCell<SimpleTraceContext>>,
+}
+
+impl std::fmt::Debug for TracerRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TracerRef")
+            .field("id", &self.id)
+            .field("aval", &self.aval)
+            .finish()
+    }
+}
+
+impl TracerRef {
+    /// Get the tracer ID.
+    #[must_use]
+    pub fn id(&self) -> TracerId {
+        self.id
+    }
+
+    /// Get the abstract value (dtype + shape).
+    #[must_use]
+    pub fn aval(&self) -> &ShapedArray {
+        &self.aval
+    }
+
+    /// Apply a unary primitive operation (e.g., sin, cos, neg, exp).
+    pub fn unary_op(&self, primitive: Primitive) -> Result<TracerRef, TraceError> {
+        let output_ids =
+            self.ctx
+                .borrow_mut()
+                .process_primitive(primitive, &[self.id], BTreeMap::new())?;
+        let ctx = self.ctx.borrow();
+        let aval = ctx.tracer_aval(output_ids[0])?.clone();
+        drop(ctx);
+        Ok(TracerRef {
+            id: output_ids[0],
+            aval,
+            ctx: Rc::clone(&self.ctx),
+        })
+    }
+
+    /// Apply a binary primitive operation (e.g., add, sub, mul).
+    pub fn binary_op(
+        &self,
+        primitive: Primitive,
+        other: &TracerRef,
+    ) -> Result<TracerRef, TraceError> {
+        let output_ids = self.ctx.borrow_mut().process_primitive(
+            primitive,
+            &[self.id, other.id],
+            BTreeMap::new(),
+        )?;
+        let ctx = self.ctx.borrow();
+        let aval = ctx.tracer_aval(output_ids[0])?.clone();
+        drop(ctx);
+        Ok(TracerRef {
+            id: output_ids[0],
+            aval,
+            ctx: Rc::clone(&self.ctx),
+        })
+    }
+
+    /// Apply a primitive with custom parameters.
+    pub fn primitive_with_params(
+        &self,
+        primitive: Primitive,
+        other_inputs: &[&TracerRef],
+        params: BTreeMap<String, String>,
+    ) -> Result<Vec<TracerRef>, TraceError> {
+        let mut input_ids = vec![self.id];
+        for other in other_inputs {
+            input_ids.push(other.id);
+        }
+        let output_ids = self
+            .ctx
+            .borrow_mut()
+            .process_primitive(primitive, &input_ids, params)?;
+        let ctx = self.ctx.borrow();
+        let refs = output_ids
+            .into_iter()
+            .map(|oid| {
+                let aval = ctx.tracer_aval(oid).unwrap().clone();
+                TracerRef {
+                    id: oid,
+                    aval,
+                    ctx: Rc::clone(&self.ctx),
+                }
+            })
+            .collect();
+        Ok(refs)
+    }
+}
+
+// ── Operator overloading for TracerRef ────────────────────────────
+
+impl std::ops::Add for &TracerRef {
+    type Output = TracerRef;
+    fn add(self, rhs: Self) -> TracerRef {
+        self.binary_op(Primitive::Add, rhs)
+            .expect("add tracing failed")
+    }
+}
+
+impl std::ops::Add for TracerRef {
+    type Output = TracerRef;
+    fn add(self, rhs: Self) -> TracerRef {
+        self.binary_op(Primitive::Add, &rhs)
+            .expect("add tracing failed")
+    }
+}
+
+impl std::ops::Sub for &TracerRef {
+    type Output = TracerRef;
+    fn sub(self, rhs: Self) -> TracerRef {
+        self.binary_op(Primitive::Sub, rhs)
+            .expect("sub tracing failed")
+    }
+}
+
+impl std::ops::Sub for TracerRef {
+    type Output = TracerRef;
+    fn sub(self, rhs: Self) -> TracerRef {
+        self.binary_op(Primitive::Sub, &rhs)
+            .expect("sub tracing failed")
+    }
+}
+
+impl std::ops::Mul for &TracerRef {
+    type Output = TracerRef;
+    fn mul(self, rhs: Self) -> TracerRef {
+        self.binary_op(Primitive::Mul, rhs)
+            .expect("mul tracing failed")
+    }
+}
+
+impl std::ops::Mul for TracerRef {
+    type Output = TracerRef;
+    fn mul(self, rhs: Self) -> TracerRef {
+        self.binary_op(Primitive::Mul, &rhs)
+            .expect("mul tracing failed")
+    }
+}
+
+impl std::ops::Neg for &TracerRef {
+    type Output = TracerRef;
+    fn neg(self) -> TracerRef {
+        self.unary_op(Primitive::Neg).expect("neg tracing failed")
+    }
+}
+
+impl std::ops::Neg for TracerRef {
+    type Output = TracerRef;
+    fn neg(self) -> TracerRef {
+        self.unary_op(Primitive::Neg).expect("neg tracing failed")
+    }
+}
+
+/// Trace a Rust closure into a Jaxpr, analogous to `jax.make_jaxpr(f)(*args)`.
+///
+/// The closure receives `TracerRef` values representing abstract inputs.
+/// All primitive operations on these tracers are recorded into the Jaxpr.
+///
+/// # Arguments
+/// - `f`: Closure that takes `&[TracerRef]` (abstract inputs) and returns `Vec<TracerRef>` (outputs).
+/// - `in_avals`: Abstract values describing each input (dtype + shape).
+///
+/// # Returns
+/// A `ClosedJaxpr` representing the traced computation.
+pub fn make_jaxpr<F>(f: F, in_avals: Vec<ShapedArray>) -> Result<ClosedJaxpr, TraceError>
+where
+    F: FnOnce(&[TracerRef]) -> Vec<TracerRef>,
+{
+    let ctx = Rc::new(RefCell::new(SimpleTraceContext::new()));
+
+    // Allocate input tracers
+    let input_refs: Vec<TracerRef> = in_avals
+        .into_iter()
+        .map(|aval| {
+            let id = ctx.borrow_mut().bind_input(aval.clone());
+            TracerRef {
+                id,
+                aval,
+                ctx: Rc::clone(&ctx),
+            }
+        })
+        .collect();
+
+    // Run the user's closure
+    let output_refs = f(&input_refs);
+
+    // Extract output IDs before dropping refs
+    let output_ids: Vec<TracerId> = output_refs.iter().map(|r| r.id).collect();
+
+    // Drop all TracerRef handles so Rc refcount goes to 1
+    drop(input_refs);
+    drop(output_refs);
+
+    // Set the output tracer IDs on the active frame
+    {
+        let mut ctx_mut = ctx.borrow_mut();
+        let frame = ctx_mut.active_frame_mut();
+        frame.last_output_ids = output_ids;
+    }
+
+    // Finalize: extract the context and build Jaxpr
+    let ctx_inner = Rc::try_unwrap(ctx)
+        .map_err(|_| TraceError::CompositionViolation)?
+        .into_inner();
+
+    ctx_inner.finalize()
+}
+
+/// Trace a fallible closure into a Jaxpr.
+///
+/// Like `make_jaxpr`, but the closure can return `Err(TraceError)`.
+pub fn make_jaxpr_fallible<F>(f: F, in_avals: Vec<ShapedArray>) -> Result<ClosedJaxpr, TraceError>
+where
+    F: FnOnce(&[TracerRef]) -> Result<Vec<TracerRef>, TraceError>,
+{
+    let ctx = Rc::new(RefCell::new(SimpleTraceContext::new()));
+
+    let input_refs: Vec<TracerRef> = in_avals
+        .into_iter()
+        .map(|aval| {
+            let id = ctx.borrow_mut().bind_input(aval.clone());
+            TracerRef {
+                id,
+                aval,
+                ctx: Rc::clone(&ctx),
+            }
+        })
+        .collect();
+
+    let output_refs = f(&input_refs)?;
+    let output_ids: Vec<TracerId> = output_refs.iter().map(|r| r.id).collect();
+    drop(input_refs);
+    drop(output_refs);
+
+    {
+        let mut ctx_mut = ctx.borrow_mut();
+        let frame = ctx_mut.active_frame_mut();
+        frame.last_output_ids = output_ids;
+    }
+
+    let ctx_inner = Rc::try_unwrap(ctx)
+        .map_err(|_| TraceError::CompositionViolation)?
+        .into_inner();
+
+    ctx_inner.finalize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2543,5 +2945,194 @@ mod tests {
                 Ok(Vec::new())
             },
         );
+    }
+
+    // ── make_jaxpr tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_make_jaxpr_identity() {
+        use super::make_jaxpr;
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        };
+        let closed = make_jaxpr(|inputs| vec![inputs[0].clone()], vec![aval]).unwrap();
+        assert_eq!(closed.jaxpr.invars.len(), 1);
+        assert_eq!(closed.jaxpr.outvars.len(), 1);
+        assert!(
+            closed.jaxpr.equations.is_empty(),
+            "identity should have no equations"
+        );
+        assert_eq!(closed.jaxpr.invars[0], closed.jaxpr.outvars[0]);
+    }
+
+    #[test]
+    fn test_make_jaxpr_add() {
+        use super::make_jaxpr;
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        };
+        let closed = make_jaxpr(
+            |inputs| vec![&inputs[0] + &inputs[1]],
+            vec![aval.clone(), aval],
+        )
+        .unwrap();
+        assert_eq!(closed.jaxpr.invars.len(), 2);
+        assert_eq!(closed.jaxpr.outvars.len(), 1);
+        assert_eq!(closed.jaxpr.equations.len(), 1);
+        assert_eq!(closed.jaxpr.equations[0].primitive, Primitive::Add);
+    }
+
+    #[test]
+    fn test_make_jaxpr_chain() {
+        use super::make_jaxpr;
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        };
+        // sin(cos(x)) — two-equation chain
+        let closed = make_jaxpr(
+            |inputs| {
+                let cos_x = inputs[0].unary_op(Primitive::Cos).unwrap();
+                let sin_cos_x = cos_x.unary_op(Primitive::Sin).unwrap();
+                vec![sin_cos_x]
+            },
+            vec![aval],
+        )
+        .unwrap();
+        assert_eq!(closed.jaxpr.equations.len(), 2);
+        assert_eq!(closed.jaxpr.equations[0].primitive, Primitive::Cos);
+        assert_eq!(closed.jaxpr.equations[1].primitive, Primitive::Sin);
+    }
+
+    #[test]
+    fn test_make_jaxpr_multi_output() {
+        use super::make_jaxpr;
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        };
+        // f(x) -> (x+x, x*x)
+        let closed = make_jaxpr(
+            |inputs| {
+                let doubled = &inputs[0] + &inputs[0];
+                let squared = &inputs[0] * &inputs[0];
+                vec![doubled, squared]
+            },
+            vec![aval],
+        )
+        .unwrap();
+        assert_eq!(closed.jaxpr.invars.len(), 1);
+        assert_eq!(closed.jaxpr.outvars.len(), 2);
+        assert_eq!(closed.jaxpr.equations.len(), 2);
+    }
+
+    #[test]
+    fn test_make_jaxpr_shape_validated() {
+        use super::make_jaxpr;
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape { dims: vec![3] },
+        };
+        // f(x) -> x + x, should infer shape [3]
+        let closed = make_jaxpr(|inputs| vec![&inputs[0] + &inputs[0]], vec![aval]).unwrap();
+        assert_eq!(closed.jaxpr.equations.len(), 1);
+        // Output exists and is well-formed
+        assert_eq!(closed.jaxpr.outvars.len(), 1);
+    }
+
+    #[test]
+    fn test_make_jaxpr_broadcast() {
+        use super::make_jaxpr;
+        let scalar = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        };
+        let vector = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape { dims: vec![3] },
+        };
+        // f(scalar, vector) -> scalar + vector = vector
+        let closed =
+            make_jaxpr(|inputs| vec![&inputs[0] + &inputs[1]], vec![scalar, vector]).unwrap();
+        assert_eq!(closed.jaxpr.equations.len(), 1);
+        assert_eq!(closed.jaxpr.equations[0].primitive, Primitive::Add);
+    }
+
+    #[test]
+    fn test_make_jaxpr_reduction() {
+        use super::make_jaxpr;
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape { dims: vec![3] },
+        };
+        // f(x) -> reduce_sum(x)
+        let closed = make_jaxpr(
+            |inputs| {
+                let mut params = BTreeMap::new();
+                params.insert("axes".to_owned(), "0".to_owned());
+                inputs[0]
+                    .primitive_with_params(Primitive::ReduceSum, &[], params)
+                    .unwrap()
+            },
+            vec![aval],
+        )
+        .unwrap();
+        assert_eq!(closed.jaxpr.equations.len(), 1);
+        assert_eq!(closed.jaxpr.equations[0].primitive, Primitive::ReduceSum);
+    }
+
+    #[test]
+    fn test_make_jaxpr_dot() {
+        use super::make_jaxpr;
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape { dims: vec![3] },
+        };
+        // f(x, y) -> dot(x, y)
+        let closed = make_jaxpr(
+            |inputs| {
+                inputs[0]
+                    .primitive_with_params(Primitive::Dot, &[&inputs[1]], BTreeMap::new())
+                    .unwrap()
+            },
+            vec![aval.clone(), aval],
+        )
+        .unwrap();
+        assert_eq!(closed.jaxpr.equations.len(), 1);
+        assert_eq!(closed.jaxpr.equations[0].primitive, Primitive::Dot);
+    }
+
+    #[test]
+    fn test_make_jaxpr_deterministic() {
+        use super::make_jaxpr;
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        };
+        let f = |inputs: &[super::TracerRef]| {
+            let sq = &inputs[0] * &inputs[0];
+            vec![sq + inputs[0].clone()]
+        };
+        let closed1 = make_jaxpr(f, vec![aval.clone()]).unwrap();
+        let closed2 = make_jaxpr(
+            |inputs: &[super::TracerRef]| {
+                let sq = &inputs[0] * &inputs[0];
+                vec![sq + inputs[0].clone()]
+            },
+            vec![aval],
+        )
+        .unwrap();
+        // Same structure
+        assert_eq!(closed1.jaxpr.equations.len(), closed2.jaxpr.equations.len());
+        for (e1, e2) in closed1
+            .jaxpr
+            .equations
+            .iter()
+            .zip(closed2.jaxpr.equations.iter())
+        {
+            assert_eq!(e1.primitive, e2.primitive);
+        }
     }
 }

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 fj-core = { path = "../fj-core" }
 fj-dispatch = { path = "../fj-dispatch" }
+fj-trace = { path = "../fj-trace" }
 
 [dev-dependencies]
 fj-test-utils = { path = "../fj-test-utils" }

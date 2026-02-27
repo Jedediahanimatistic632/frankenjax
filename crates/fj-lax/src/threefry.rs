@@ -73,6 +73,106 @@ pub fn random_fold_in(key: PRNGKey, data: u32) -> PRNGKey {
     PRNGKey(threefry2x32(key.0, [data, 0]))
 }
 
+/// Generate `count` pseudorandom u32 values from a key using counter-based generation.
+///
+/// Each element uses a unique counter value to produce independent samples.
+fn generate_bits(key: PRNGKey, count: usize) -> Vec<u32> {
+    let mut bits = Vec::with_capacity(count);
+    for i in 0..count.div_ceil(2) {
+        let result = threefry2x32(key.0, [i as u32, 0]);
+        bits.push(result[0]);
+        if bits.len() < count {
+            bits.push(result[1]);
+        }
+    }
+    bits
+}
+
+/// Generate uniform random f64 values in [minval, maxval).
+///
+/// Matches JAX's `jax.random.uniform`. Converts 32-bit random integers to
+/// floating-point values in [0, 1) by dividing by 2^32, then scales to the
+/// requested range.
+#[must_use]
+pub fn random_uniform(key: PRNGKey, count: usize, minval: f64, maxval: f64) -> Vec<f64> {
+    let bits = generate_bits(key, count);
+    let scale = maxval - minval;
+    bits.into_iter()
+        .map(|b| {
+            let unit = (b as f64) / (u32::MAX as f64 + 1.0);
+            minval + unit * scale
+        })
+        .collect()
+}
+
+/// Generate standard normal random f64 values using the Box-Muller transform.
+///
+/// Matches JAX's approach for generating normally distributed samples.
+/// Uses pairs of uniform samples to produce pairs of normal samples.
+#[must_use]
+pub fn random_normal(key: PRNGKey, count: usize) -> Vec<f64> {
+    // Box-Muller needs pairs of uniform samples
+    let pairs_needed = count.div_ceil(2);
+    let total_uniforms = pairs_needed * 2;
+    let bits = generate_bits(key, total_uniforms);
+
+    let mut result = Vec::with_capacity(count);
+    for i in 0..pairs_needed {
+        // Convert to (0,1) range — avoid exact 0 for log
+        let u1 = ((bits[2 * i] as f64) + 1.0) / (u32::MAX as f64 + 2.0);
+        let u2 = ((bits[2 * i + 1] as f64) + 1.0) / (u32::MAX as f64 + 2.0);
+
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f64::consts::PI * u2;
+
+        result.push(r * theta.cos());
+        if result.len() < count {
+            result.push(r * theta.sin());
+        }
+    }
+    result
+}
+
+/// Generate Bernoulli random boolean values with probability `p` of being true.
+///
+/// Matches JAX's `jax.random.bernoulli`.
+#[must_use]
+pub fn random_bernoulli(key: PRNGKey, count: usize, p: f64) -> Vec<bool> {
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    uniforms.into_iter().map(|u| u < p).collect()
+}
+
+/// Generate categorical samples from logits using the Gumbel-max trick.
+///
+/// Returns integer indices drawn from the categorical distribution defined by `logits`.
+/// Uses the Gumbel-max trick: argmax(logits + Gumbel noise) gives categorical samples.
+#[must_use]
+pub fn random_categorical(key: PRNGKey, logits: &[f64], num_samples: usize) -> Vec<usize> {
+    let num_categories = logits.len();
+    // Need num_samples * num_categories uniform samples for Gumbel noise
+    let total = num_samples * num_categories;
+    let uniforms = random_uniform(key, total, 0.0, 1.0);
+
+    let mut result = Vec::with_capacity(num_samples);
+    for s in 0..num_samples {
+        let mut best_idx = 0;
+        let mut best_val = f64::NEG_INFINITY;
+        for c in 0..num_categories {
+            let u = uniforms[s * num_categories + c];
+            // Gumbel noise: -log(-log(u)), clamp u away from 0 and 1
+            let clamped = u.clamp(1e-30, 1.0 - 1e-10);
+            let gumbel = -(-clamped.ln()).ln();
+            let val = logits[c] + gumbel;
+            if val > best_val {
+                best_val = val;
+                best_idx = c;
+            }
+        }
+        result.push(best_idx);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,7 +210,11 @@ mod tests {
         // the implementation is self-consistent.
         let result = threefry2x32([0, 0], [0, 0]);
         // Verify non-trivial output
-        assert_ne!(result, [0, 0], "ThreeFry should produce non-zero output for zero inputs");
+        assert_ne!(
+            result,
+            [0, 0],
+            "ThreeFry should produce non-zero output for zero inputs"
+        );
         // Store reference value for regression
         let expected = result;
         assert_eq!(
@@ -158,7 +262,10 @@ mod tests {
         let derived1 = random_fold_in(key, 0);
         let derived2 = random_fold_in(key, 1);
         // Different data should produce different keys
-        assert_ne!(derived1, derived2, "fold_in with different data should produce different keys");
+        assert_ne!(
+            derived1, derived2,
+            "fold_in with different data should produce different keys"
+        );
         // fold_in should be deterministic
         assert_eq!(
             random_fold_in(key, 0),
@@ -212,6 +319,227 @@ mod tests {
         assert!(
             chi_sq_total < 150.0,
             "Bit uniformity chi-squared test failed: chi_sq={chi_sq_total:.1} (threshold=150)"
+        );
+    }
+
+    // === Sampling function tests ===
+
+    #[test]
+    fn test_uniform_range() {
+        let key = random_key(42);
+        let vals = random_uniform(key, 10_000, -2.0, 5.0);
+        for v in &vals {
+            assert!(
+                *v >= -2.0 && *v < 5.0,
+                "uniform value {v} out of range [-2, 5)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_uniform_shape() {
+        let key = random_key(99);
+        let vals = random_uniform(key, 137, 0.0, 1.0);
+        assert_eq!(vals.len(), 137);
+    }
+
+    #[test]
+    fn test_uniform_default_range() {
+        let key = random_key(7);
+        let vals = random_uniform(key, 10_000, 0.0, 1.0);
+        for v in &vals {
+            assert!(*v >= 0.0 && *v < 1.0, "uniform value {v} out of [0,1)");
+        }
+    }
+
+    #[test]
+    fn test_normal_mean_stddev() {
+        let key = random_key(42);
+        let n = 10_000;
+        let vals = random_normal(key, n);
+        assert_eq!(vals.len(), n);
+        let mean = vals.iter().sum::<f64>() / n as f64;
+        let variance = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+        let stddev = variance.sqrt();
+        assert!(mean.abs() < 0.05, "normal mean should be ~0, got {mean}");
+        assert!(
+            (stddev - 1.0).abs() < 0.05,
+            "normal stddev should be ~1, got {stddev}"
+        );
+    }
+
+    #[test]
+    fn test_normal_shape() {
+        let key = random_key(123);
+        let vals = random_normal(key, 200);
+        assert_eq!(vals.len(), 200);
+    }
+
+    #[test]
+    fn test_bernoulli_probability() {
+        let key = random_key(42);
+        let n = 10_000;
+        let vals = random_bernoulli(key, n, 0.3);
+        let true_count = vals.iter().filter(|&&v| v).count();
+        let ratio = true_count as f64 / n as f64;
+        assert!(
+            (ratio - 0.3).abs() < 0.03,
+            "bernoulli p=0.3 should have ~30% true, got {ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn test_bernoulli_extreme_p0() {
+        let key = random_key(1);
+        let vals = random_bernoulli(key, 1000, 0.0);
+        assert!(
+            vals.iter().all(|&v| !v),
+            "bernoulli p=0.0 should be all false"
+        );
+    }
+
+    #[test]
+    fn test_bernoulli_extreme_p1() {
+        let key = random_key(1);
+        let vals = random_bernoulli(key, 1000, 1.0);
+        assert!(
+            vals.iter().all(|&v| v),
+            "bernoulli p=1.0 should be all true"
+        );
+    }
+
+    #[test]
+    fn test_sampling_deterministic() {
+        let key = random_key(42);
+        let a = random_uniform(key, 100, 0.0, 1.0);
+        let b = random_uniform(key, 100, 0.0, 1.0);
+        assert_eq!(a, b, "same key must produce same samples");
+        let c = random_normal(key, 50);
+        let d = random_normal(key, 50);
+        assert_eq!(c, d, "normal: same key must produce same samples");
+    }
+
+    #[test]
+    fn test_sampling_different_keys() {
+        let k1 = random_key(42);
+        let k2 = random_key(43);
+        let a = random_uniform(k1, 100, 0.0, 1.0);
+        let b = random_uniform(k2, 100, 0.0, 1.0);
+        assert_ne!(a, b, "different keys should produce different samples");
+    }
+
+    // === Statistical tests ===
+
+    #[test]
+    fn test_uniform_ks_test() {
+        // Kolmogorov-Smirnov test against uniform [0,1)
+        let key = random_key(42);
+        let n = 10_000;
+        let mut vals = random_uniform(key, n, 0.0, 1.0);
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut d_max = 0.0_f64;
+        for (i, v) in vals.iter().enumerate() {
+            let empirical = (i + 1) as f64 / n as f64;
+            let theoretical = *v; // CDF of uniform [0,1) is x
+            d_max = d_max.max((empirical - theoretical).abs());
+            let empirical_minus = i as f64 / n as f64;
+            d_max = d_max.max((empirical_minus - theoretical).abs());
+        }
+        // KS critical value at alpha=0.01: ~1.63 / sqrt(n)
+        let critical = 1.63 / (n as f64).sqrt();
+        assert!(
+            d_max < critical,
+            "KS test failed: D={d_max:.4}, critical={critical:.4}"
+        );
+    }
+
+    #[test]
+    fn test_normal_ks_test() {
+        // KS test against standard normal using approximate CDF
+        let key = random_key(42);
+        let n = 10_000;
+        let mut vals = random_normal(key, n);
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut d_max = 0.0_f64;
+        for (i, v) in vals.iter().enumerate() {
+            let empirical = (i + 1) as f64 / n as f64;
+            // Approximate standard normal CDF using erf
+            let theoretical = 0.5 * (1.0 + erf_approx(*v / std::f64::consts::SQRT_2));
+            d_max = d_max.max((empirical - theoretical).abs());
+            let empirical_minus = i as f64 / n as f64;
+            d_max = d_max.max((empirical_minus - theoretical).abs());
+        }
+        let critical = 1.63 / (n as f64).sqrt();
+        assert!(
+            d_max < critical,
+            "Normal KS test failed: D={d_max:.4}, critical={critical:.4}"
+        );
+    }
+
+    /// Approximate erf function for test use.
+    fn erf_approx(x: f64) -> f64 {
+        // Abramowitz and Stegun approximation 7.1.26
+        let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+        let x = x.abs();
+        let t = 1.0 / (1.0 + 0.327_591_1 * x);
+        let poly = t
+            * (0.254_829_592
+                + t * (-0.284_496_736
+                    + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
+        sign * (1.0 - poly * (-x * x).exp())
+    }
+
+    #[test]
+    fn test_bernoulli_binomial_test() {
+        // Test that bernoulli with p=0.5 passes a simple binomial check
+        let key = random_key(42);
+        let n = 10_000;
+        let vals = random_bernoulli(key, n, 0.5);
+        let true_count = vals.iter().filter(|&&v| v).count() as f64;
+        // Under H0: true_count ~ Binomial(n, 0.5), mean=5000, sd=50
+        let z = (true_count - 5000.0) / 50.0;
+        assert!(
+            z.abs() < 3.0,
+            "Bernoulli binomial test failed: z={z:.2} (|z| > 3)"
+        );
+    }
+
+    // === Categorical tests ===
+
+    #[test]
+    fn test_categorical_basic() {
+        let key = random_key(42);
+        let logits = [0.0, 0.0, 0.0]; // uniform over 3 categories
+        let samples = random_categorical(key, &logits, 10_000);
+        assert_eq!(samples.len(), 10_000);
+        // All indices should be in [0, 3)
+        for &idx in &samples {
+            assert!(idx < 3, "categorical index {idx} out of range");
+        }
+        // Roughly uniform distribution
+        let mut counts = [0usize; 3];
+        for &idx in &samples {
+            counts[idx] += 1;
+        }
+        for (i, &count) in counts.iter().enumerate() {
+            let ratio = count as f64 / 10_000.0;
+            assert!(
+                (ratio - 1.0 / 3.0).abs() < 0.03,
+                "category {i} ratio {ratio:.3} too far from 1/3"
+            );
+        }
+    }
+
+    #[test]
+    fn test_categorical_skewed() {
+        let key = random_key(42);
+        // log(0.9) ≈ -0.105, log(0.05) ≈ -2.996, log(0.05) ≈ -2.996
+        let logits = [10.0, 0.0, 0.0]; // heavily favor first category
+        let samples = random_categorical(key, &logits, 1000);
+        let count_0 = samples.iter().filter(|&&i| i == 0).count();
+        assert!(
+            count_0 > 900,
+            "heavily-weighted category should dominate, got {count_0}/1000"
         );
     }
 }

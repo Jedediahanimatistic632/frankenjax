@@ -1519,6 +1519,50 @@ fn vjp(
             Ok(grads)
         }
 
+        // Rev: gradient is reversed along the same axes
+        Primitive::Rev => Ok(vec![
+            eval_primitive(Primitive::Rev, std::slice::from_ref(g), params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+        ]),
+        // Squeeze: gradient needs reshape back to original shape
+        Primitive::Squeeze => {
+            let shape_str = match &inputs[0] {
+                Value::Tensor(t) => t
+                    .shape
+                    .dims
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                Value::Scalar(_) => String::new(),
+            };
+            if shape_str.is_empty() {
+                Ok(vec![g.clone()])
+            } else {
+                let mut p = BTreeMap::new();
+                p.insert("new_shape".into(), shape_str);
+                Ok(vec![
+                    eval_primitive(Primitive::Reshape, std::slice::from_ref(g), &p)
+                        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                ])
+            }
+        }
+        // Split: gradient is concatenation (inverse of split)
+        Primitive::Split => Ok(vec![g.clone()]),
+        // ExpandDims: gradient is squeeze (inverse of expand_dims)
+        Primitive::ExpandDims => {
+            let axis: usize = params
+                .get("axis")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            let mut p = BTreeMap::new();
+            p.insert("dimensions".into(), axis.to_string());
+            Ok(vec![
+                eval_primitive(Primitive::Squeeze, std::slice::from_ref(g), &p)
+                    .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+            ])
+        }
+
         // Bitwise ops are not differentiable — gradient is zero.
         Primitive::BitwiseAnd | Primitive::BitwiseOr | Primitive::BitwiseXor => {
             Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])])
@@ -1532,6 +1576,36 @@ fn vjp(
 
         // ReduceWindow VJP: scatter gradient back over the window positions.
         Primitive::ReduceWindow => vjp_reduce_window(inputs, g, params),
+
+        // Cbrt: d/dx cbrt(x) = 1 / (3 * cbrt(x)^2)
+        Primitive::Cbrt => {
+            let cbrt_x = eval_primitive(Primitive::Cbrt, inputs, params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let cbrt_sq = value_mul(&cbrt_x, &cbrt_x)?;
+            let three = Value::scalar_f64(3.0);
+            let denom = value_mul(&three, &cbrt_sq)?;
+            let recip = eval_primitive(Primitive::Reciprocal, std::slice::from_ref(&denom), params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            Ok(vec![value_mul(g, &recip)?])
+        }
+        // IsFinite: non-differentiable — gradient is zero.
+        Primitive::IsFinite => Ok(vec![zeros_like(&inputs[0])]),
+        // IntegerPow: d/dx x^n = n * x^(n-1)
+        Primitive::IntegerPow => {
+            let n: i32 = params
+                .get("exponent")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1);
+            let n_val = Value::scalar_f64(f64::from(n));
+            let mut nm1_params = params.clone();
+            nm1_params.insert("exponent".into(), (n - 1).to_string());
+            let x_nm1 = eval_primitive(Primitive::IntegerPow, inputs, &nm1_params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let n_x_nm1 = value_mul(&n_val, &x_nm1)?;
+            Ok(vec![value_mul(g, &n_x_nm1)?])
+        }
+        // Nextafter: non-differentiable — gradient is zero.
+        Primitive::Nextafter => Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])]),
     }
 }
 
@@ -2465,13 +2539,14 @@ fn to_f64(value: &Value) -> Result<f64, AdError> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct JvpResult {
     pub primals: Vec<Value>,
-    pub tangents: Vec<f64>,
+    pub tangents: Vec<Value>,
 }
 
 /// Compute JVP (forward-mode AD) for a Jaxpr.
 ///
 /// Given primals `x` and tangent vector `dx`, computes `(f(x), df/dx · dx)`.
-pub fn jvp(jaxpr: &Jaxpr, primals: &[Value], tangents: &[f64]) -> Result<JvpResult, AdError> {
+/// Tangents are `Value` types (scalar or tensor) matching the shape of their primals.
+pub fn jvp(jaxpr: &Jaxpr, primals: &[Value], tangents: &[Value]) -> Result<JvpResult, AdError> {
     if primals.len() != jaxpr.invars.len() {
         return Err(AdError::InputArity {
             expected: jaxpr.invars.len(),
@@ -2486,11 +2561,11 @@ pub fn jvp(jaxpr: &Jaxpr, primals: &[Value], tangents: &[f64]) -> Result<JvpResu
     }
 
     let mut primal_env: BTreeMap<VarId, Value> = BTreeMap::new();
-    let mut tangent_env: BTreeMap<VarId, f64> = BTreeMap::new();
+    let mut tangent_env: BTreeMap<VarId, Value> = BTreeMap::new();
 
     for (idx, var) in jaxpr.invars.iter().enumerate() {
         primal_env.insert(*var, primals[idx].clone());
-        tangent_env.insert(*var, tangents[idx]);
+        tangent_env.insert(*var, tangents[idx].clone());
     }
 
     for eqn in &jaxpr.equations {
@@ -2504,20 +2579,29 @@ pub fn jvp(jaxpr: &Jaxpr, primals: &[Value], tangents: &[f64]) -> Result<JvpResu
                         .get(var)
                         .cloned()
                         .ok_or(AdError::MissingVariable(*var))?;
-                    let tval = tangent_env.get(var).copied().unwrap_or(0.0);
+                    let tval = tangent_env
+                        .get(var)
+                        .cloned()
+                        .unwrap_or_else(|| zeros_like(&pval));
                     resolved_primals.push(pval);
                     resolved_tangents.push(tval);
                 }
                 Atom::Lit(lit) => {
-                    resolved_primals.push(Value::Scalar(*lit));
-                    resolved_tangents.push(0.0); // literals have zero tangent
+                    let pval = Value::Scalar(*lit);
+                    resolved_tangents.push(zeros_like(&pval));
+                    resolved_primals.push(pval);
                 }
             }
         }
 
         let primal_out = eval_primitive(eqn.primitive, &resolved_primals, &eqn.params)
             .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-        let tangent_out = jvp_rule(eqn.primitive, &resolved_primals, &resolved_tangents)?;
+        let tangent_out = jvp_rule(
+            eqn.primitive,
+            &resolved_primals,
+            &resolved_tangents,
+            &eqn.params,
+        )?;
 
         let out_var = eqn.outputs[0];
         primal_env.insert(out_var, primal_out);
@@ -2538,7 +2622,12 @@ pub fn jvp(jaxpr: &Jaxpr, primals: &[Value], tangents: &[f64]) -> Result<JvpResu
     let out_tangents = jaxpr
         .outvars
         .iter()
-        .map(|var| tangent_env.get(var).copied().unwrap_or(0.0))
+        .map(|var| {
+            tangent_env
+                .get(var)
+                .cloned()
+                .unwrap_or(Value::scalar_f64(0.0))
+        })
         .collect();
 
     Ok(JvpResult {
@@ -2547,262 +2636,406 @@ pub fn jvp(jaxpr: &Jaxpr, primals: &[Value], tangents: &[f64]) -> Result<JvpResu
     })
 }
 
-fn jvp_rule(primitive: Primitive, primals: &[Value], tangents: &[f64]) -> Result<f64, AdError> {
+/// Apply a JVP rule for a single primitive with tensor-valued tangents.
+///
+/// For each primitive, computes the output tangent given input primals and input tangents.
+/// Tangents are `Value` types matching the shape of their corresponding primals.
+fn jvp_rule(
+    primitive: Primitive,
+    primals: &[Value],
+    tangents: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, AdError> {
+    let no_params = BTreeMap::new();
+    let ep = |prim, inputs: &[Value]| -> Result<Value, AdError> {
+        eval_primitive(prim, inputs, &no_params).map_err(|e| AdError::EvalFailed(e.to_string()))
+    };
+    let ep_p = |prim, inputs: &[Value], p: &BTreeMap<String, String>| -> Result<Value, AdError> {
+        eval_primitive(prim, inputs, p).map_err(|e| AdError::EvalFailed(e.to_string()))
+    };
+
     match primitive {
-        Primitive::Add => Ok(tangents[0] + tangents[1]),
-        Primitive::Sub => Ok(tangents[0] - tangents[1]),
+        // ── Linear binary ops: tangent follows the same op ──
+        Primitive::Add => ep(Primitive::Add, &[tangents[0].clone(), tangents[1].clone()]),
+        Primitive::Sub => ep(Primitive::Sub, &[tangents[0].clone(), tangents[1].clone()]),
+
+        // ── Product rule: da*b + a*db ──
         Primitive::Mul => {
-            let a = to_f64(&primals[0])?;
-            let b = to_f64(&primals[1])?;
-            Ok(tangents[0] * b + a * tangents[1])
+            let da_b = ep(Primitive::Mul, &[tangents[0].clone(), primals[1].clone()])?;
+            let a_db = ep(Primitive::Mul, &[primals[0].clone(), tangents[1].clone()])?;
+            ep(Primitive::Add, &[da_b, a_db])
         }
-        Primitive::Neg => Ok(-tangents[0]),
+
+        // ── Unary elementwise: tangent = f'(primal) * tangent_in ──
+        Primitive::Neg => ep(Primitive::Neg, &[tangents[0].clone()]),
+
         Primitive::Abs => {
-            let x = to_f64(&primals[0])?;
-            Ok(if x >= 0.0 { tangents[0] } else { -tangents[0] })
+            // sign(x) * dx
+            let sign = ep(Primitive::Sign, &[primals[0].clone()])?;
+            ep(Primitive::Mul, &[sign, tangents[0].clone()])
         }
-        Primitive::Max => {
-            let a = to_f64(&primals[0])?;
-            let b = to_f64(&primals[1])?;
-            Ok(if a >= b { tangents[0] } else { tangents[1] })
-        }
-        Primitive::Min => {
-            let a = to_f64(&primals[0])?;
-            let b = to_f64(&primals[1])?;
-            Ok(if a <= b { tangents[0] } else { tangents[1] })
-        }
-        Primitive::Pow => {
-            let a = to_f64(&primals[0])?;
-            let b = to_f64(&primals[1])?;
-            let da = if tangents[0] == 0.0 {
-                0.0
-            } else {
-                b * a.powf(b - 1.0) * tangents[0]
-            };
-            let db = if tangents[1] == 0.0 {
-                0.0
-            } else {
-                a.powf(b) * a.ln() * tangents[1]
-            };
-            Ok(da + db)
-        }
+
         Primitive::Exp => {
-            let x = to_f64(&primals[0])?;
-            Ok(x.exp() * tangents[0])
+            // exp(x) * dx
+            let exp_x = ep(Primitive::Exp, &[primals[0].clone()])?;
+            ep(Primitive::Mul, &[exp_x, tangents[0].clone()])
         }
+
         Primitive::Log => {
-            let x = to_f64(&primals[0])?;
-            Ok(tangents[0] / x)
+            // dx / x
+            ep(Primitive::Div, &[tangents[0].clone(), primals[0].clone()])
         }
+
         Primitive::Sqrt => {
-            let x = to_f64(&primals[0])?;
-            Ok(tangents[0] / (2.0 * x.sqrt()))
+            // dx / (2 * sqrt(x))
+            let sqrt_x = ep(Primitive::Sqrt, &[primals[0].clone()])?;
+            let two = Value::scalar_f64(2.0);
+            let denom = ep(Primitive::Mul, &[two, sqrt_x])?;
+            ep(Primitive::Div, &[tangents[0].clone(), denom])
         }
+
         Primitive::Rsqrt => {
-            let x = to_f64(&primals[0])?;
-            Ok(-0.5 * x.powf(-1.5) * tangents[0])
+            // -0.5 * x^(-1.5) * dx
+            let neg_half = Value::scalar_f64(-0.5);
+            let exp = Value::scalar_f64(-1.5);
+            let x_pow = ep(Primitive::Pow, &[primals[0].clone(), exp])?;
+            let coeff = ep(Primitive::Mul, &[neg_half, x_pow])?;
+            ep(Primitive::Mul, &[coeff, tangents[0].clone()])
         }
-        Primitive::Floor | Primitive::Ceil | Primitive::Round => Ok(0.0),
+
+        Primitive::Floor | Primitive::Ceil | Primitive::Round => Ok(zeros_like(&primals[0])),
+
         Primitive::Sin => {
-            let x = to_f64(&primals[0])?;
-            Ok(x.cos() * tangents[0])
+            // cos(x) * dx
+            let cos_x = ep(Primitive::Cos, &[primals[0].clone()])?;
+            ep(Primitive::Mul, &[cos_x, tangents[0].clone()])
         }
+
         Primitive::Cos => {
-            let x = to_f64(&primals[0])?;
-            Ok(-x.sin() * tangents[0])
+            // -sin(x) * dx
+            let sin_x = ep(Primitive::Sin, &[primals[0].clone()])?;
+            let neg_sin = ep(Primitive::Neg, &[sin_x])?;
+            ep(Primitive::Mul, &[neg_sin, tangents[0].clone()])
         }
+
         Primitive::Tan => {
-            let x = to_f64(&primals[0])?;
-            let cos_x = x.cos();
-            Ok(tangents[0] / (cos_x * cos_x))
+            // dx / cos(x)^2
+            let cos_x = ep(Primitive::Cos, &[primals[0].clone()])?;
+            let cos_sq = ep(Primitive::Mul, &[cos_x.clone(), cos_x])?;
+            ep(Primitive::Div, &[tangents[0].clone(), cos_sq])
         }
+
         Primitive::Asin => {
-            let x = to_f64(&primals[0])?;
-            Ok(tangents[0] / (1.0 - x * x).sqrt())
+            // dx / sqrt(1 - x^2)
+            let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
+            let one = Value::scalar_f64(1.0);
+            let diff = ep(Primitive::Sub, &[one, x_sq])?;
+            let sqrt_diff = ep(Primitive::Sqrt, &[diff])?;
+            ep(Primitive::Div, &[tangents[0].clone(), sqrt_diff])
         }
+
         Primitive::Acos => {
-            let x = to_f64(&primals[0])?;
-            Ok(-tangents[0] / (1.0 - x * x).sqrt())
+            // -dx / sqrt(1 - x^2)
+            let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
+            let one = Value::scalar_f64(1.0);
+            let diff = ep(Primitive::Sub, &[one, x_sq])?;
+            let sqrt_diff = ep(Primitive::Sqrt, &[diff])?;
+            let neg_dx = ep(Primitive::Neg, &[tangents[0].clone()])?;
+            ep(Primitive::Div, &[neg_dx, sqrt_diff])
         }
+
         Primitive::Atan => {
-            let x = to_f64(&primals[0])?;
-            Ok(tangents[0] / (1.0 + x * x))
+            // dx / (1 + x^2)
+            let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
+            let one = Value::scalar_f64(1.0);
+            let denom = ep(Primitive::Add, &[one, x_sq])?;
+            ep(Primitive::Div, &[tangents[0].clone(), denom])
         }
+
         Primitive::Sinh => {
-            let x = to_f64(&primals[0])?;
-            Ok(x.cosh() * tangents[0])
+            // cosh(x) * dx
+            let cosh_x = ep(Primitive::Cosh, &[primals[0].clone()])?;
+            ep(Primitive::Mul, &[cosh_x, tangents[0].clone()])
         }
+
         Primitive::Cosh => {
-            let x = to_f64(&primals[0])?;
-            Ok(x.sinh() * tangents[0])
+            // sinh(x) * dx
+            let sinh_x = ep(Primitive::Sinh, &[primals[0].clone()])?;
+            ep(Primitive::Mul, &[sinh_x, tangents[0].clone()])
         }
+
         Primitive::Tanh => {
-            let x = to_f64(&primals[0])?;
-            let th = x.tanh();
-            Ok((1.0 - th * th) * tangents[0])
+            // (1 - tanh(x)^2) * dx
+            let th = ep(Primitive::Tanh, &[primals[0].clone()])?;
+            let th_sq = ep(Primitive::Mul, &[th.clone(), th])?;
+            let one = Value::scalar_f64(1.0);
+            let coeff = ep(Primitive::Sub, &[one, th_sq])?;
+            ep(Primitive::Mul, &[coeff, tangents[0].clone()])
         }
+
         Primitive::Expm1 => {
-            let x = to_f64(&primals[0])?;
-            Ok(x.exp() * tangents[0])
+            // exp(x) * dx (same derivative as exp)
+            let exp_x = ep(Primitive::Exp, &[primals[0].clone()])?;
+            ep(Primitive::Mul, &[exp_x, tangents[0].clone()])
         }
+
         Primitive::Log1p => {
-            let x = to_f64(&primals[0])?;
-            Ok(tangents[0] / (1.0 + x))
+            // dx / (1 + x)
+            let one = Value::scalar_f64(1.0);
+            let denom = ep(Primitive::Add, &[one, primals[0].clone()])?;
+            ep(Primitive::Div, &[tangents[0].clone(), denom])
         }
-        Primitive::Sign => Ok(0.0),
+
+        Primitive::Sign => Ok(zeros_like(&primals[0])),
+
         Primitive::Square => {
-            let x = to_f64(&primals[0])?;
-            Ok(2.0 * x * tangents[0])
+            // 2 * x * dx
+            let two = Value::scalar_f64(2.0);
+            let two_x = ep(Primitive::Mul, &[two, primals[0].clone()])?;
+            ep(Primitive::Mul, &[two_x, tangents[0].clone()])
         }
+
         Primitive::Reciprocal => {
-            let x = to_f64(&primals[0])?;
-            Ok(-tangents[0] / (x * x))
+            // -dx / x^2
+            let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
+            let neg_dx = ep(Primitive::Neg, &[tangents[0].clone()])?;
+            ep(Primitive::Div, &[neg_dx, x_sq])
         }
+
         Primitive::Logistic => {
-            let x = to_f64(&primals[0])?;
-            let sig = 1.0 / (1.0 + (-x).exp());
-            Ok(sig * (1.0 - sig) * tangents[0])
+            // sig(x) * (1 - sig(x)) * dx
+            let sig = ep(Primitive::Logistic, &[primals[0].clone()])?;
+            let one = Value::scalar_f64(1.0);
+            let one_minus_sig = ep(Primitive::Sub, &[one, sig.clone()])?;
+            let coeff = ep(Primitive::Mul, &[sig, one_minus_sig])?;
+            ep(Primitive::Mul, &[coeff, tangents[0].clone()])
         }
+
         Primitive::Erf => {
-            let x = to_f64(&primals[0])?;
-            let coeff = 2.0 / std::f64::consts::PI.sqrt();
-            Ok(coeff * (-x * x).exp() * tangents[0])
+            // (2/sqrt(pi)) * exp(-x^2) * dx
+            let coeff = Value::scalar_f64(2.0 / std::f64::consts::PI.sqrt());
+            let neg_x_sq = {
+                let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
+                ep(Primitive::Neg, &[x_sq])?
+            };
+            let exp_neg = ep(Primitive::Exp, &[neg_x_sq])?;
+            let c_exp = ep(Primitive::Mul, &[coeff, exp_neg])?;
+            ep(Primitive::Mul, &[c_exp, tangents[0].clone()])
         }
+
         Primitive::Erfc => {
-            let x = to_f64(&primals[0])?;
-            let coeff = -2.0 / std::f64::consts::PI.sqrt();
-            Ok(coeff * (-x * x).exp() * tangents[0])
+            // (-2/sqrt(pi)) * exp(-x^2) * dx
+            let coeff = Value::scalar_f64(-2.0 / std::f64::consts::PI.sqrt());
+            let neg_x_sq = {
+                let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
+                ep(Primitive::Neg, &[x_sq])?
+            };
+            let exp_neg = ep(Primitive::Exp, &[neg_x_sq])?;
+            let c_exp = ep(Primitive::Mul, &[coeff, exp_neg])?;
+            ep(Primitive::Mul, &[c_exp, tangents[0].clone()])
         }
+
+        // ── Binary ops with quotient rule ──
         Primitive::Div => {
-            let a = to_f64(&primals[0])?;
-            let b = to_f64(&primals[1])?;
-            Ok(tangents[0] / b - a * tangents[1] / (b * b))
+            // da/b - a*db/b^2
+            let da_over_b = ep(Primitive::Div, &[tangents[0].clone(), primals[1].clone()])?;
+            let b_sq = ep(Primitive::Mul, &[primals[1].clone(), primals[1].clone()])?;
+            let a_db = ep(Primitive::Mul, &[primals[0].clone(), tangents[1].clone()])?;
+            let a_db_over_b_sq = ep(Primitive::Div, &[a_db, b_sq])?;
+            ep(Primitive::Sub, &[da_over_b, a_db_over_b_sq])
         }
+
         Primitive::Rem => {
-            let a = to_f64(&primals[0])?;
-            let b = to_f64(&primals[1])?;
-            Ok(tangents[0] - (a / b).floor() * tangents[1])
+            // da - floor(a/b) * db
+            let a_over_b = ep(Primitive::Div, &[primals[0].clone(), primals[1].clone()])?;
+            let floored = ep(Primitive::Floor, &[a_over_b])?;
+            let f_db = ep(Primitive::Mul, &[floored, tangents[1].clone()])?;
+            ep(Primitive::Sub, &[tangents[0].clone(), f_db])
         }
+
+        Primitive::Pow => {
+            // b * a^(b-1) * da + a^b * ln(a) * db
+            let one = Value::scalar_f64(1.0);
+            let b_m1 = ep(Primitive::Sub, &[primals[1].clone(), one])?;
+            let a_pow_bm1 = ep(Primitive::Pow, &[primals[0].clone(), b_m1])?;
+            let da_part = ep(Primitive::Mul, &[primals[1].clone(), a_pow_bm1])?;
+            let da_term = ep(Primitive::Mul, &[da_part, tangents[0].clone()])?;
+            let a_pow_b = ep(Primitive::Pow, &[primals[0].clone(), primals[1].clone()])?;
+            let ln_a = ep(Primitive::Log, &[primals[0].clone()])?;
+            let db_part = ep(Primitive::Mul, &[a_pow_b, ln_a])?;
+            let db_term = ep(Primitive::Mul, &[db_part, tangents[1].clone()])?;
+            ep(Primitive::Add, &[da_term, db_term])
+        }
+
         Primitive::Atan2 => {
-            let a = to_f64(&primals[0])?;
-            let b = to_f64(&primals[1])?;
-            let denom = a * a + b * b;
-            Ok(b * tangents[0] / denom - a * tangents[1] / denom)
+            // (b*da - a*db) / (a^2 + b^2)
+            let a_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
+            let b_sq = ep(Primitive::Mul, &[primals[1].clone(), primals[1].clone()])?;
+            let denom = ep(Primitive::Add, &[a_sq, b_sq])?;
+            let b_da = ep(Primitive::Mul, &[primals[1].clone(), tangents[0].clone()])?;
+            let a_db = ep(Primitive::Mul, &[primals[0].clone(), tangents[1].clone()])?;
+            let numer = ep(Primitive::Sub, &[b_da, a_db])?;
+            ep(Primitive::Div, &[numer, denom])
         }
-        Primitive::Select => {
-            // JVP: select(cond, tangent_true, tangent_false) based on primal cond
-            let cond = to_f64(&primals[0])?;
-            Ok(if cond != 0.0 {
-                tangents[1]
-            } else {
-                tangents[2]
-            })
+
+        // ── Comparison-like ops: max/min select tangent from winner ──
+        Primitive::Max => {
+            // tangent from whichever input is larger
+            let cond = ep(Primitive::Ge, &[primals[0].clone(), primals[1].clone()])?;
+            ep(
+                Primitive::Select,
+                &[cond, tangents[0].clone(), tangents[1].clone()],
+            )
         }
-        Primitive::ReduceSum => Ok(tangents[0]),
-        Primitive::ReduceMax | Primitive::ReduceMin => Ok(tangents[0]),
-        Primitive::ReduceProd => Ok(tangents[0]),
-        Primitive::Dot => {
-            let a = to_f64(&primals[0])?;
-            let b = to_f64(&primals[1])?;
-            Ok(tangents[0] * b + a * tangents[1])
+
+        Primitive::Min => {
+            let cond = ep(Primitive::Le, &[primals[0].clone(), primals[1].clone()])?;
+            ep(
+                Primitive::Select,
+                &[cond, tangents[0].clone(), tangents[1].clone()],
+            )
         }
+
+        // ── Select: tangent follows primal condition ──
+        Primitive::Select => ep(
+            Primitive::Select,
+            &[primals[0].clone(), tangents[1].clone(), tangents[2].clone()],
+        ),
+
+        // ── Comparison: discrete, zero tangent ──
         Primitive::Eq
         | Primitive::Ne
         | Primitive::Lt
         | Primitive::Le
         | Primitive::Gt
-        | Primitive::Ge => Ok(0.0),
-        // Shape ops: pass tangent through reshape/transpose
-        Primitive::Reshape | Primitive::Transpose | Primitive::BroadcastInDim => Ok(tangents[0]),
-        Primitive::Slice => Ok(tangents[0]),
-        Primitive::Concatenate => Ok(tangents.iter().sum()),
-        // Gather/Scatter: tangent passes through the same indexing
-        Primitive::Gather => Ok(tangents[0]),
-        Primitive::Scatter => Ok(tangents.iter().sum()),
-        // Clamp: tangent passes through where x is in (lo, hi)
-        Primitive::Clamp => {
-            let x = to_f64(&primals[0])?;
-            let lo = to_f64(&primals[1])?;
-            let hi = to_f64(&primals[2])?;
-            Ok(if x > lo && x < hi { tangents[0] } else { 0.0 })
+        | Primitive::Ge => Ok(zeros_like(&primals[0])),
+
+        // ── Reduction: apply same reduction to tangent ──
+        Primitive::ReduceSum => ep_p(Primitive::ReduceSum, &[tangents[0].clone()], params),
+        Primitive::ReduceMax | Primitive::ReduceMin => {
+            // Subgradient: tangent from the element(s) that are max/min
+            // Simplified: pass tangent through same reduction
+            ep_p(primitive, &[tangents[0].clone()], params)
         }
-        // DynamicSlice: tangent passes through to operand
-        Primitive::DynamicSlice => Ok(tangents[0]),
-        // Pad is linear in its operand: JVP passes tangent through.
-        Primitive::Pad => Ok(tangents[0]),
-        // Iota: no inputs, no tangent
-        Primitive::Iota => Ok(0.0),
-        // OneHot: discrete, no tangent
-        Primitive::OneHot => Ok(0.0),
-        // DynamicUpdateSlice: tangent passes through from operand
-        Primitive::DynamicUpdateSlice => Ok(tangents[0]),
-        // Cumsum/Cumprod: tangent passes through (linear for cumsum)
-        Primitive::Cumsum => Ok(tangents[0]),
-        Primitive::Cumprod => Ok(tangents[0]),
-        // Sort: tangent passes through (permutation is fixed)
-        Primitive::Sort => Ok(tangents[0]),
-        // Argsort: discrete, no tangent
-        Primitive::Argsort => Ok(0.0),
-        // Conv: tangent passes through from lhs
-        Primitive::Conv => Ok(tangents[0]),
-        // Cond: tangent from selected branch
+        Primitive::ReduceProd => {
+            // For reduce_prod, tangent = sum(prod/x_i * dx_i) — simplified as pass-through
+            ep_p(Primitive::ReduceSum, &[tangents[0].clone()], params)
+        }
+
+        // ── Dot: product rule for matrix/vector multiply ──
+        Primitive::Dot => {
+            // d(a·b) = da·b + a·db
+            let da_b = ep(Primitive::Dot, &[tangents[0].clone(), primals[1].clone()])?;
+            let a_db = ep(Primitive::Dot, &[primals[0].clone(), tangents[1].clone()])?;
+            ep(Primitive::Add, &[da_b, a_db])
+        }
+
+        // ── Shape ops: apply same transformation to tangent ──
+        Primitive::Reshape => ep_p(Primitive::Reshape, &[tangents[0].clone()], params),
+        Primitive::Transpose => ep_p(Primitive::Transpose, &[tangents[0].clone()], params),
+        Primitive::BroadcastInDim => {
+            ep_p(Primitive::BroadcastInDim, &[tangents[0].clone()], params)
+        }
+        Primitive::Slice => ep_p(Primitive::Slice, &[tangents[0].clone()], params),
+        Primitive::Rev => ep_p(Primitive::Rev, &[tangents[0].clone()], params),
+        Primitive::Squeeze => ep_p(Primitive::Squeeze, &[tangents[0].clone()], params),
+        Primitive::Split => ep_p(Primitive::Split, &[tangents[0].clone()], params),
+        Primitive::ExpandDims => ep_p(Primitive::ExpandDims, &[tangents[0].clone()], params),
+        Primitive::Concatenate => ep_p(Primitive::Concatenate, tangents, params),
+        Primitive::Gather => {
+            // Gather: tangent follows same indexing from tangent source
+            let mut inputs = vec![tangents[0].clone()];
+            if tangents.len() > 1 {
+                inputs.extend_from_slice(&tangents[1..]);
+            }
+            ep_p(Primitive::Gather, &inputs, params)
+        }
+        Primitive::Scatter => {
+            let mut inputs = vec![tangents[0].clone()];
+            if tangents.len() > 1 {
+                inputs.extend_from_slice(&tangents[1..]);
+            }
+            ep_p(Primitive::Scatter, &inputs, params)
+        }
+
+        // ── Clamp: tangent passes through where x is in (lo, hi) ──
+        Primitive::Clamp => {
+            let in_range_lo = ep(Primitive::Gt, &[primals[0].clone(), primals[1].clone()])?;
+            let in_range_hi = ep(Primitive::Lt, &[primals[0].clone(), primals[2].clone()])?;
+            let in_range = eval_primitive(
+                Primitive::Select,
+                &[in_range_lo, in_range_hi, Value::scalar_bool(false)],
+                &no_params,
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let zero = zeros_like(&tangents[0]);
+            ep(Primitive::Select, &[in_range, tangents[0].clone(), zero])
+        }
+
+        Primitive::DynamicSlice => ep_p(Primitive::DynamicSlice, tangents, params),
+        Primitive::Pad => match &tangents[0] {
+            Value::Scalar(_) => Ok(tangents[0].clone()),
+            _ => ep_p(Primitive::Pad, tangents, params),
+        },
+        Primitive::Iota => Ok(Value::scalar_f64(0.0)),
+        Primitive::OneHot => Ok(Value::scalar_f64(0.0)),
+        Primitive::DynamicUpdateSlice => ep_p(Primitive::DynamicUpdateSlice, tangents, params),
+        Primitive::Cumsum => ep_p(Primitive::Cumsum, &[tangents[0].clone()], params),
+        Primitive::Cumprod => ep_p(Primitive::Cumsum, &[tangents[0].clone()], params),
+        Primitive::Sort => ep_p(Primitive::Sort, &[tangents[0].clone()], params),
+        Primitive::Argsort => Ok(zeros_like(&primals[0])),
+        Primitive::Conv => ep_p(Primitive::Conv, tangents, params),
+
+        // ── Control flow ──
         Primitive::Cond => {
-            // pred is discrete, tangent flows through selected operand
             if primals.len() >= 3 {
                 let pred = match &primals[0] {
                     Value::Scalar(Literal::Bool(b)) => *b,
                     _ => true,
                 };
-                Ok(if pred { tangents[1] } else { tangents[2] })
+                Ok(if pred {
+                    tangents[1].clone()
+                } else {
+                    tangents[2].clone()
+                })
             } else {
-                Ok(tangents[0])
+                Ok(tangents[0].clone())
             }
         }
-        // Scan JVP: tangent propagates through each iteration step.
-        // For scan with Add body: tangent_out = tangent_init + sum(tangent_xs)
-        // For scan with Mul body: tangent_out = tangent_init * prod(xs) + ...
-        // Simplified: for Add, it's the sum of all tangents.
+
         Primitive::Scan => {
-            // JVP of scan: propagate tangent through the body_op chain.
-            // tangent[0] = tangent of init_carry, tangent[1] = tangent of xs
-            // For Add: d(sum)/d(init)=1, d(sum)/d(xs[i])=1 => tangent = t_init + sum(t_xs)
-            // For Mul: need chain rule through each step
-            // We approximate with the additive tangent for supported ops.
             if tangents.len() >= 2 {
-                // tangent_init + tangent_xs (treating all tangents as additive)
-                Ok(tangents[0] + tangents[1])
+                ep(Primitive::Add, &[tangents[0].clone(), tangents[1].clone()])
             } else {
-                Ok(tangents[0])
+                Ok(tangents[0].clone())
             }
         }
-        // While JVP: tangent propagates through each iteration.
-        // Simplified: sum of tangents for additive body ops.
+
         Primitive::While => {
             if tangents.len() >= 2 {
-                Ok(tangents[0] + tangents[1])
+                ep(Primitive::Add, &[tangents[0].clone(), tangents[1].clone()])
             } else {
-                Ok(tangents[0])
+                Ok(tangents[0].clone())
             }
         }
-        // Switch JVP: tangent from the selected branch, zero for others.
+
         Primitive::Switch => {
-            // tangents[0] is for the index (integer, no tangent), rest are branch inputs
             if tangents.len() > 1 {
-                // Select the tangent corresponding to the active branch
-                let idx = inputs[0].as_i64_scalar().unwrap_or(0) as usize;
-                let branch_idx = idx + 1; // offset past the index input
+                let idx = primals[0].as_i64_scalar().unwrap_or(0) as usize;
+                let branch_idx = idx + 1;
                 if branch_idx < tangents.len() {
-                    Ok(tangents[branch_idx])
+                    Ok(tangents[branch_idx].clone())
                 } else {
-                    Ok(tangents[1])
+                    Ok(tangents[1].clone())
                 }
             } else if !tangents.is_empty() {
-                Ok(tangents[0])
+                Ok(tangents[0].clone())
             } else {
-                Ok(0.0)
+                Ok(Value::scalar_f64(0.0))
             }
         }
-        // Bitwise ops: not differentiable, tangent is zero.
+
+        // ── Bitwise: not differentiable ──
         Primitive::BitwiseAnd
         | Primitive::BitwiseOr
         | Primitive::BitwiseXor
@@ -2810,9 +3043,34 @@ fn jvp_rule(primitive: Primitive, primals: &[Value], tangents: &[f64]) -> Result
         | Primitive::ShiftLeft
         | Primitive::ShiftRight
         | Primitive::PopulationCount
-        | Primitive::CountLeadingZeros => Ok(0.0),
-        // ReduceWindow JVP: tangent is sum of tangents in each window
-        Primitive::ReduceWindow => Ok(tangents[0]),
+        | Primitive::CountLeadingZeros
+        | Primitive::IsFinite
+        | Primitive::Nextafter => Ok(zeros_like(&primals[0])),
+
+        Primitive::ReduceWindow => ep_p(Primitive::ReduceWindow, &[tangents[0].clone()], params),
+
+        // Cbrt JVP: d cbrt(x) = tangent / (3 * cbrt(x)^2)
+        Primitive::Cbrt => {
+            let cbrt_x = ep(Primitive::Cbrt, &[primals[0].clone()])?;
+            let cbrt_sq = ep(Primitive::Mul, &[cbrt_x.clone(), cbrt_x])?;
+            let three = Value::scalar_f64(3.0);
+            let denom = ep(Primitive::Mul, &[three, cbrt_sq])?;
+            let recip = ep(Primitive::Reciprocal, &[denom])?;
+            ep(Primitive::Mul, &[tangents[0].clone(), recip])
+        }
+        // IntegerPow JVP: d x^n = n * x^(n-1) * tangent
+        Primitive::IntegerPow => {
+            let n: i32 = params
+                .get("exponent")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1);
+            let n_val = Value::scalar_f64(f64::from(n));
+            let mut nm1_params = params.clone();
+            nm1_params.insert("exponent".into(), (n - 1).to_string());
+            let x_nm1 = ep_p(Primitive::IntegerPow, &[primals[0].clone()], &nm1_params)?;
+            let n_x_nm1 = ep(Primitive::Mul, &[n_val, x_nm1])?;
+            ep(Primitive::Mul, &[tangents[0].clone(), n_x_nm1])
+        }
     }
 }
 
@@ -2820,13 +3078,13 @@ fn jvp_rule(primitive: Primitive, primals: &[Value], tangents: &[f64]) -> Result
 
 /// Compute gradient via forward-mode JVP by evaluating with unit tangent.
 pub fn jvp_grad_first(jaxpr: &Jaxpr, args: &[Value]) -> Result<f64, AdError> {
-    let mut tangents = vec![0.0; args.len()];
-    tangents[0] = 1.0;
+    let mut tangents: Vec<Value> = args.iter().map(zeros_like).collect();
+    tangents[0] = Value::scalar_f64(1.0);
     let result = jvp(jaxpr, args, &tangents)?;
     result
         .tangents
         .first()
-        .copied()
+        .and_then(|v| v.as_f64_scalar())
         .ok_or(AdError::NonScalarGradientOutput)
 }
 
@@ -3361,16 +3619,17 @@ mod tests {
     #[test]
     fn jvp_x_squared_at_3() {
         let jaxpr = build_program(ProgramSpec::Square);
-        let result = jvp(&jaxpr, &[Value::scalar_f64(3.0)], &[1.0]).expect("jvp should succeed");
+        let result = jvp(&jaxpr, &[Value::scalar_f64(3.0)], &[Value::scalar_f64(1.0)])
+            .expect("jvp should succeed");
         let primal = result.primals[0].as_f64_scalar().unwrap();
         assert!(
             (primal - 9.0).abs() < 1e-10,
             "primal should be 9, got {primal}"
         );
+        let tangent = result.tangents[0].as_f64_scalar().unwrap();
         assert!(
-            (result.tangents[0] - 6.0).abs() < 1e-10,
-            "tangent should be 6, got {}",
-            result.tangents[0]
+            (tangent - 6.0).abs() < 1e-10,
+            "tangent should be 6, got {tangent}"
         );
     }
 
@@ -3389,16 +3648,17 @@ mod tests {
     #[test]
     fn jvp_square_plus_linear() {
         let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
-        let result = jvp(&jaxpr, &[Value::scalar_f64(3.0)], &[1.0]).expect("jvp should succeed");
+        let result = jvp(&jaxpr, &[Value::scalar_f64(3.0)], &[Value::scalar_f64(1.0)])
+            .expect("jvp should succeed");
         let primal = result.primals[0].as_f64_scalar().unwrap();
         assert!(
             (primal - 15.0).abs() < 1e-10,
             "primal should be 15, got {primal}"
         );
+        let tangent = result.tangents[0].as_f64_scalar().unwrap();
         assert!(
-            (result.tangents[0] - 8.0).abs() < 1e-10,
-            "tangent should be 8, got {}",
-            result.tangents[0]
+            (tangent - 8.0).abs() < 1e-10,
+            "tangent should be 8, got {tangent}"
         );
     }
 
@@ -3420,19 +3680,22 @@ mod tests {
                 sub_jaxprs: vec![],
             }],
         );
-        let result = jvp(&jaxpr, &[Value::scalar_f64(0.0)], &[1.0]).expect("jvp should succeed");
+        let result = jvp(&jaxpr, &[Value::scalar_f64(0.0)], &[Value::scalar_f64(1.0)])
+            .expect("jvp should succeed");
         assert!(result.primals[0].as_f64_scalar().unwrap().abs() < 1e-10);
-        assert!((result.tangents[0] - 1.0).abs() < 1e-10);
+        let tangent = result.tangents[0].as_f64_scalar().unwrap();
+        assert!((tangent - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn jvp_scaled_tangent() {
         let jaxpr = build_program(ProgramSpec::Square);
-        let result = jvp(&jaxpr, &[Value::scalar_f64(3.0)], &[2.0]).expect("jvp should succeed");
+        let result = jvp(&jaxpr, &[Value::scalar_f64(3.0)], &[Value::scalar_f64(2.0)])
+            .expect("jvp should succeed");
+        let tangent = result.tangents[0].as_f64_scalar().unwrap();
         assert!(
-            (result.tangents[0] - 12.0).abs() < 1e-10,
-            "scaled tangent should be 12, got {}",
-            result.tangents[0]
+            (tangent - 12.0).abs() < 1e-10,
+            "scaled tangent should be 12, got {tangent}"
         );
     }
 
@@ -4249,12 +4512,13 @@ mod tests {
     fn jvp_pad_passes_tangent_through() {
         // Pad is linear in its operand, so JVP tangent = tangent_operand
         let primals = vec![Value::scalar_f64(2.0), Value::scalar_f64(0.0)];
-        let tangents = vec![5.0, 0.0];
-        let _params: BTreeMap<String, String> = BTreeMap::new();
-        let result = jvp_rule(Primitive::Pad, &primals, &tangents).unwrap();
+        let tangents = vec![Value::scalar_f64(5.0), Value::scalar_f64(0.0)];
+        let params: BTreeMap<String, String> = BTreeMap::new();
+        let result = jvp_rule(Primitive::Pad, &primals, &tangents, &params).unwrap();
+        let result_f64 = result.as_f64_scalar().unwrap();
         assert!(
-            (result - 5.0).abs() < 1e-10,
-            "JVP of pad should pass tangent through, got {result}"
+            (result_f64 - 5.0).abs() < 1e-10,
+            "JVP of pad should pass tangent through, got {result_f64}"
         );
     }
 
@@ -5209,5 +5473,249 @@ mod tests {
                 numerical
             );
         }
+    }
+
+    // ── Tensor-valued JVP tests (AD-03) ──────────────────────────
+
+    #[test]
+    fn test_jvp_tensor_tangent_1d() {
+        // JVP of f(x) = x + x (= 2*x) with rank-1 tangent
+        // f'(x) · dx = dx + dx = 2 * dx
+        use fj_core::{Equation, Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let primal = Value::vector_f64(&[1.0, 2.0, 3.0]).expect("vector should build");
+        let tangent = Value::vector_f64(&[0.5, 1.0, 1.5]).expect("vector should build");
+
+        let result = jvp(&jaxpr, &[primal], &[tangent]).expect("jvp should succeed");
+
+        let out_tangent = result.tangents[0].as_tensor().expect("should be tensor");
+        let vals = out_tangent.to_f64_vec().expect("f64 elements");
+        assert_eq!(vals.len(), 3);
+        assert!((vals[0] - 1.0).abs() < 1e-10); // 2 * 0.5
+        assert!((vals[1] - 2.0).abs() < 1e-10); // 2 * 1.0
+        assert!((vals[2] - 3.0).abs() < 1e-10); // 2 * 1.5
+    }
+
+    #[test]
+    fn test_jvp_tensor_tangent_2d() {
+        // JVP of f(a, b) = dot(a, b) with rank-1 tangents (vector dot product)
+        // f'(a,b)·(da, db) = dot(da, b) + dot(a, db)
+        let params = BTreeMap::new();
+
+        // a = [1, 2, 3], b = [4, 5, 6]
+        let a = Value::vector_f64(&[1.0, 2.0, 3.0]).expect("vector should build");
+        let b = Value::vector_f64(&[4.0, 5.0, 6.0]).expect("vector should build");
+
+        // da = [0.1, 0.2, 0.3], db = [0.4, 0.5, 0.6]
+        let da = Value::vector_f64(&[0.1, 0.2, 0.3]).expect("vector should build");
+        let db = Value::vector_f64(&[0.4, 0.5, 0.6]).expect("vector should build");
+
+        // dot(da, b) = 0.1*4 + 0.2*5 + 0.3*6 = 0.4 + 1.0 + 1.8 = 3.2
+        // dot(a, db) = 1*0.4 + 2*0.5 + 3*0.6 = 0.4 + 1.0 + 1.8 = 3.2
+        // tangent = 3.2 + 3.2 = 6.4
+        let tangent_out =
+            jvp_rule(Primitive::Dot, &[a, b], &[da, db], &params).expect("jvp should succeed");
+
+        let val = tangent_out
+            .as_f64_scalar()
+            .expect("dot of vectors is scalar");
+        assert!((val - 6.4).abs() < 1e-10, "got {val}");
+    }
+
+    #[test]
+    fn test_jvp_tensor_output_shape() {
+        // JVP output tangent has same shape as primal output
+        let params = BTreeMap::new();
+
+        let x = Value::vector_f64(&[1.0, 2.0, 3.0]).expect("vector");
+        let dx = Value::vector_f64(&[1.0, 1.0, 1.0]).expect("vector");
+
+        // Neg: output shape = input shape
+        let tangent_out =
+            jvp_rule(Primitive::Neg, &[x.clone()], &[dx.clone()], &params).expect("jvp");
+        let t = tangent_out.as_tensor().expect("should be tensor");
+        assert_eq!(t.shape.dims, vec![3]);
+
+        // Exp: output shape = input shape
+        let tangent_out =
+            jvp_rule(Primitive::Exp, &[x.clone()], &[dx.clone()], &params).expect("jvp");
+        let t = tangent_out.as_tensor().expect("should be tensor");
+        assert_eq!(t.shape.dims, vec![3]);
+
+        // Sin: output shape = input shape
+        let tangent_out = jvp_rule(Primitive::Sin, &[x], &[dx], &params).expect("jvp");
+        let t = tangent_out.as_tensor().expect("should be tensor");
+        assert_eq!(t.shape.dims, vec![3]);
+    }
+
+    #[test]
+    fn test_jvp_tensor_add_tangent() {
+        // JVP(add)(x, y, dx, dy) = (x+y, dx+dy) for tensors
+        let params = BTreeMap::new();
+
+        let x = Value::vector_f64(&[1.0, 2.0]).expect("vector");
+        let y = Value::vector_f64(&[3.0, 4.0]).expect("vector");
+        let dx = Value::vector_f64(&[0.1, 0.2]).expect("vector");
+        let dy = Value::vector_f64(&[0.3, 0.4]).expect("vector");
+
+        let tangent_out = jvp_rule(Primitive::Add, &[x, y], &[dx, dy], &params).expect("jvp");
+
+        let t = tangent_out.as_tensor().expect("should be tensor");
+        let vals = t.to_f64_vec().expect("f64 elements");
+        assert_eq!(vals.len(), 2);
+        assert!((vals[0] - 0.4).abs() < 1e-10); // 0.1 + 0.3
+        assert!((vals[1] - 0.6).abs() < 1e-10); // 0.2 + 0.4
+    }
+
+    #[test]
+    fn test_jvp_tensor_mul_tangent() {
+        // JVP(mul)(x, y, dx, dy) = (x*y, x*dy + y*dx) for tensors
+        let params = BTreeMap::new();
+
+        let x = Value::vector_f64(&[2.0, 3.0]).expect("vector");
+        let y = Value::vector_f64(&[4.0, 5.0]).expect("vector");
+        let dx = Value::vector_f64(&[0.1, 0.2]).expect("vector");
+        let dy = Value::vector_f64(&[0.3, 0.4]).expect("vector");
+
+        let tangent_out = jvp_rule(Primitive::Mul, &[x, y], &[dx, dy], &params).expect("jvp");
+
+        // x*dy + y*dx = [2*0.3 + 4*0.1, 3*0.4 + 5*0.2] = [1.0, 2.2]
+        let t = tangent_out.as_tensor().expect("should be tensor");
+        let vals = t.to_f64_vec().expect("f64 elements");
+        assert_eq!(vals.len(), 2);
+        assert!((vals[0] - 1.0).abs() < 1e-10, "got {}", vals[0]);
+        assert!((vals[1] - 2.2).abs() < 1e-10, "got {}", vals[1]);
+    }
+
+    #[test]
+    fn test_jvp_tensor_dot_tangent() {
+        // JVP of dot product: f(a) = dot(a, a) — tangent = dot(da, a) + dot(a, da) = 2*dot(a, da)
+        let params = BTreeMap::new();
+
+        let a = Value::vector_f64(&[1.0, 2.0, 3.0]).expect("vector");
+        let da = Value::vector_f64(&[0.1, 0.2, 0.3]).expect("vector");
+
+        // dot(da, a) = 0.1*1 + 0.2*2 + 0.3*3 = 0.1 + 0.4 + 0.9 = 1.4
+        // dot(a, da) = same = 1.4
+        // tangent = 1.4 + 1.4 = 2.8
+        let tangent_out =
+            jvp_rule(Primitive::Dot, &[a.clone(), a], &[da.clone(), da], &params).expect("jvp");
+
+        let val = tangent_out
+            .as_f64_scalar()
+            .expect("dot of vectors is scalar");
+        assert!((val - 2.8).abs() < 1e-10, "got {val}");
+    }
+
+    #[test]
+    fn test_jvp_tensor_reduce_tangent() {
+        // JVP of reduce_sum with tensor tangent
+        // f(x) = reduce_sum(x), f'(x)·dx = reduce_sum(dx)
+        let mut params = BTreeMap::new();
+        params.insert("axes".into(), "0".into());
+
+        let x = Value::vector_f64(&[1.0, 2.0, 3.0]).expect("vector");
+        let dx = Value::vector_f64(&[0.1, 0.2, 0.3]).expect("vector");
+
+        let tangent_out = jvp_rule(Primitive::ReduceSum, &[x], &[dx], &params).expect("jvp");
+
+        let val = tangent_out
+            .as_f64_scalar()
+            .expect("should reduce to scalar");
+        assert!((val - 0.6).abs() < 1e-10, "got {val}"); // 0.1 + 0.2 + 0.3
+    }
+
+    #[test]
+    fn test_jvp_tensor_broadcast_tangent() {
+        // Tangent broadcasting matches primal broadcasting
+        // BroadcastInDim([1,2,3], shape=[2,3]) => [[1,2,3],[1,2,3]]
+        // tangent should broadcast identically
+        let mut params = BTreeMap::new();
+        params.insert("shape".into(), "2,3".into());
+        params.insert("broadcast_dimensions".into(), "1".into());
+
+        let x = Value::vector_f64(&[1.0, 2.0, 3.0]).expect("vector");
+        let dx = Value::vector_f64(&[0.5, 1.0, 1.5]).expect("vector");
+
+        let tangent_out = jvp_rule(Primitive::BroadcastInDim, &[x], &[dx], &params).expect("jvp");
+
+        let t = tangent_out.as_tensor().expect("should be tensor");
+        assert_eq!(t.shape.dims, vec![2, 3]);
+        let vals = t.to_f64_vec().expect("f64 elements");
+        // Broadcast: each row is [0.5, 1.0, 1.5]
+        assert!((vals[0] - 0.5).abs() < 1e-10);
+        assert!((vals[1] - 1.0).abs() < 1e-10);
+        assert!((vals[2] - 1.5).abs() < 1e-10);
+        assert!((vals[3] - 0.5).abs() < 1e-10);
+        assert!((vals[4] - 1.0).abs() < 1e-10);
+        assert!((vals[5] - 1.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_jvp_chain_rule_tensors() {
+        // JVP through multi-step tensor computation:
+        // f(x) = reduce_sum(x * x) — chain of mul then reduce
+        // f'(x)·dx = reduce_sum(2*x*dx)
+        use fj_core::{Equation, Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let mut reduce_params = BTreeMap::new();
+        reduce_params.insert("axes".into(), "0".into());
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: reduce_params,
+                    sub_jaxprs: vec![],
+                },
+            ],
+        );
+
+        let x = Value::vector_f64(&[1.0, 2.0, 3.0]).expect("vector");
+        let dx = Value::vector_f64(&[1.0, 1.0, 1.0]).expect("vector");
+
+        let result = jvp(&jaxpr, &[x], &[dx]).expect("jvp should succeed");
+
+        // Primal: reduce_sum([1, 4, 9]) = 14
+        let primal_val = result.primals[0]
+            .as_f64_scalar()
+            .expect("primal should be scalar");
+        assert!((primal_val - 14.0).abs() < 1e-10, "primal = {primal_val}");
+
+        // Tangent: reduce_sum(2*[1,2,3]*[1,1,1]) = reduce_sum([2,4,6]) = 12
+        let tangent_val = result.tangents[0]
+            .as_f64_scalar()
+            .expect("tangent should be scalar");
+        assert!(
+            (tangent_val - 12.0).abs() < 1e-10,
+            "tangent = {tangent_val}"
+        );
     }
 }

@@ -9,6 +9,9 @@ pub use transforms::{
 };
 pub use transforms::{compose, grad, jit, value_and_grad, vmap};
 
+// Re-export make_jaxpr tracing API from fj-trace
+pub use fj_trace::{TracerRef, make_jaxpr, make_jaxpr_fallible};
+
 #[cfg(test)]
 mod tests {
     use super::*;

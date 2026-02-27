@@ -11,16 +11,17 @@ use fj_core::{Literal, Primitive, Shape, TensorValue, Value, ValueError};
 use std::collections::BTreeMap;
 
 use arithmetic::{
-    erf_approx, eval_binary_elementwise, eval_clamp, eval_dot, eval_select, eval_unary_elementwise,
-    eval_unary_int_or_float,
+    erf_approx, eval_binary_elementwise, eval_clamp, eval_dot, eval_integer_pow, eval_is_finite,
+    eval_nextafter, eval_select, eval_unary_elementwise, eval_unary_int_or_float,
 };
 
 use comparison::eval_comparison;
 use reduction::{eval_cumulative, eval_reduce_axes};
 use tensor_ops::{
     eval_argsort, eval_broadcast_in_dim, eval_concatenate, eval_conv, eval_dynamic_slice,
-    eval_dynamic_update_slice, eval_gather, eval_iota, eval_one_hot, eval_pad, eval_reshape,
-    eval_scatter, eval_slice, eval_sort, eval_transpose,
+    eval_dynamic_update_slice, eval_expand_dims, eval_gather, eval_iota, eval_one_hot, eval_pad,
+    eval_reshape, eval_rev, eval_scatter, eval_slice, eval_sort, eval_split, eval_squeeze,
+    eval_transpose,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +261,15 @@ pub fn eval_primitive(
         Primitive::BroadcastInDim => eval_broadcast_in_dim(inputs, params),
         Primitive::Concatenate => eval_concatenate(inputs, params),
         Primitive::Pad => eval_pad(inputs, params),
+        Primitive::Rev => eval_rev(inputs, params),
+        Primitive::Squeeze => eval_squeeze(inputs, params),
+        Primitive::Split => eval_split(inputs, params),
+        Primitive::ExpandDims => eval_expand_dims(inputs, params),
+        // Special math
+        Primitive::Cbrt => eval_unary_elementwise(primitive, inputs, f64::cbrt),
+        Primitive::IsFinite => eval_is_finite(primitive, inputs),
+        Primitive::IntegerPow => eval_integer_pow(primitive, inputs, params),
+        Primitive::Nextafter => eval_nextafter(primitive, inputs),
         Primitive::Slice => eval_slice(inputs, params),
         Primitive::DynamicSlice => eval_dynamic_slice(inputs, params),
         Primitive::Gather => eval_gather(inputs, params),
@@ -782,9 +792,7 @@ fn eval_switch(
     if index_val < 0 || index_val as usize >= num_branches {
         return Err(EvalError::Unsupported {
             primitive,
-            detail: format!(
-                "switch index {index_val} out of bounds for {num_branches} branches"
-            ),
+            detail: format!("switch index {index_val} out of bounds for {num_branches} branches"),
         });
     }
 
@@ -4747,12 +4755,280 @@ mod tests {
         .unwrap();
         assert_eq!(out.as_f64_scalar().unwrap(), 42.0);
     }
+
+    // ── Rev tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_rev_1d() {
+        let input = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("axes".into(), "0".into());
+        let out = eval_primitive(Primitive::Rev, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        assert_eq!(vals, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn test_rev_2d_axis0() {
+        // [[1,2],[3,4],[5,6]] reversed along axis 0 => [[5,6],[3,4],[1,2]]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![3, 2] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                    Literal::I64(5),
+                    Literal::I64(6),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axes".into(), "0".into());
+        let out = eval_primitive(Primitive::Rev, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        assert_eq!(vals, vec![5, 6, 3, 4, 1, 2]);
+    }
+
+    #[test]
+    fn test_rev_2d_axis1() {
+        // [[1,2,3],[4,5,6]] reversed along axis 1 => [[3,2,1],[6,5,4]]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                    Literal::I64(5),
+                    Literal::I64(6),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axes".into(), "1".into());
+        let out = eval_primitive(Primitive::Rev, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        assert_eq!(vals, vec![3, 2, 1, 6, 5, 4]);
+    }
+
+    // ── Squeeze tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_squeeze_remove_leading() {
+        // [1, 4, 1] → [4, 1] removing dim 0
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![1, 4, 1],
+                },
+                vec![
+                    Literal::I64(10),
+                    Literal::I64(20),
+                    Literal::I64(30),
+                    Literal::I64(40),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("dimensions".into(), "0".into());
+        let out = eval_primitive(Primitive::Squeeze, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.shape.dims, vec![4, 1]);
+        let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        assert_eq!(vals, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn test_squeeze_remove_trailing() {
+        // [4, 1] → [4] removing dim 1
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![4, 1] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("dimensions".into(), "1".into());
+        let out = eval_primitive(Primitive::Squeeze, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.shape.dims, vec![4]);
+    }
+
+    #[test]
+    fn test_squeeze_remove_multiple() {
+        // [1, 4, 1, 3, 1] → [4, 3] removing dims 0, 2, 4
+        let mut elems = Vec::new();
+        for i in 0..12 {
+            elems.push(Literal::I64(i));
+        }
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![1, 4, 1, 3, 1],
+                },
+                elems,
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("dimensions".into(), "0,2,4".into());
+        let out = eval_primitive(Primitive::Squeeze, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.shape.dims, vec![4, 3]);
+        assert_eq!(t.elements.len(), 12);
+    }
+
+    #[test]
+    fn test_squeeze_no_op() {
+        // [4, 3] with no size-1 dims — identity
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![4, 3] },
+                (0..12).map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let params = BTreeMap::new(); // no dimensions param — squeeze all size-1, which is none
+        let out = eval_primitive(Primitive::Squeeze, &[input.clone()], &params).unwrap();
+        assert_eq!(out, input);
+    }
+
+    // ── Split tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_split_equal() {
+        // split [1,2,3,4,5,6] into 3 equal parts: [[1,2],[3,4],[5,6]]
+        let input = Value::vector_i64(&[1, 2, 3, 4, 5, 6]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("axis".into(), "0".into());
+        params.insert("num_sections".into(), "3".into());
+        let out = eval_primitive(Primitive::Split, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        // Result shape: [3, 2]
+        assert_eq!(t.shape.dims, vec![3, 2]);
+        let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        assert_eq!(vals, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_split_unequal() {
+        // split [1,2,3,4,5] with sizes [2,3] — first section = [1,2]
+        let input = Value::vector_i64(&[1, 2, 3, 4, 5]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("axis".into(), "0".into());
+        params.insert("sizes".into(), "2,3".into());
+        let out = eval_primitive(Primitive::Split, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        // Unequal split returns first section: shape [2]
+        assert_eq!(t.shape.dims, vec![2]);
+        let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        assert_eq!(vals, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_split_axis1() {
+        // 2x4 matrix split along axis 1 into 2 parts → shape [2, 2, 2]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 4] },
+                (1..=8).map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axis".into(), "1".into());
+        params.insert("num_sections".into(), "2".into());
+        let out = eval_primitive(Primitive::Split, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.shape.dims, vec![2, 2, 2]);
+    }
+
+    // ── ExpandDims tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_expand_dims_leading() {
+        // expand_dims [4, 3] axis=0 → [1, 4, 3]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![4, 3] },
+                (0..12).map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axis".into(), "0".into());
+        let out = eval_primitive(Primitive::ExpandDims, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.shape.dims, vec![1, 4, 3]);
+        assert_eq!(t.elements.len(), 12);
+    }
+
+    #[test]
+    fn test_expand_dims_trailing() {
+        // expand_dims [4, 3] axis=2 → [4, 3, 1]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![4, 3] },
+                (0..12).map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axis".into(), "2".into());
+        let out = eval_primitive(Primitive::ExpandDims, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.shape.dims, vec![4, 3, 1]);
+        assert_eq!(t.elements.len(), 12);
+    }
+
+    #[test]
+    fn test_expand_dims_middle() {
+        // expand_dims [4, 3] axis=1 → [4, 1, 3]
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![4, 3] },
+                (0..12).map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axis".into(), "1".into());
+        let out = eval_primitive(Primitive::ExpandDims, &[input], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.shape.dims, vec![4, 1, 3]);
+        assert_eq!(t.elements.len(), 12);
+    }
 }
 
 #[cfg(test)]
 mod prop_tests {
-    use super::eval_primitive;
-    use fj_core::{Primitive, Value};
+    use super::{EvalError, eval_fori_loop, eval_primitive};
+    use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
     use proptest::prelude::*;
     use std::collections::BTreeMap;
 
@@ -4917,5 +5193,369 @@ mod prop_tests {
             ).unwrap();
             prop_assert_eq!(result, Value::scalar_i64(a));
         }
+    }
+
+    // ── Switch tests ─────────────────────────────────────────────────
+    #[test]
+    fn test_switch_two_branches() {
+        let mut params = no_params();
+        params.insert("num_branches".into(), "2".into());
+
+        // Select branch 0
+        let result = eval_primitive(
+            Primitive::Switch,
+            &[
+                Value::scalar_i64(0),
+                Value::scalar_f64(10.0),
+                Value::scalar_f64(20.0),
+            ],
+            &params,
+        )
+        .unwrap();
+        assert_eq!(result, Value::scalar_f64(10.0));
+
+        // Select branch 1
+        let result = eval_primitive(
+            Primitive::Switch,
+            &[
+                Value::scalar_i64(1),
+                Value::scalar_f64(10.0),
+                Value::scalar_f64(20.0),
+            ],
+            &params,
+        )
+        .unwrap();
+        assert_eq!(result, Value::scalar_f64(20.0));
+    }
+
+    #[test]
+    fn test_switch_three_branches() {
+        let mut params = no_params();
+        params.insert("num_branches".into(), "3".into());
+
+        for idx in 0..3 {
+            let branches: Vec<Value> = vec![
+                Value::scalar_f64(100.0),
+                Value::scalar_f64(200.0),
+                Value::scalar_f64(300.0),
+            ];
+            let mut inputs = vec![Value::scalar_i64(idx)];
+            inputs.extend(branches);
+
+            let result = eval_primitive(Primitive::Switch, &inputs, &params).unwrap();
+            let expected = (idx + 1) as f64 * 100.0;
+            assert_eq!(result, Value::scalar_f64(expected));
+        }
+    }
+
+    #[test]
+    fn test_switch_out_of_bounds_error() {
+        let mut params = no_params();
+        params.insert("num_branches".into(), "2".into());
+
+        let result = eval_primitive(
+            Primitive::Switch,
+            &[
+                Value::scalar_i64(2),
+                Value::scalar_f64(10.0),
+                Value::scalar_f64(20.0),
+            ],
+            &params,
+        );
+        assert!(
+            result.is_err(),
+            "Switch with out-of-bounds index should fail"
+        );
+    }
+
+    #[test]
+    fn test_switch_negative_index_error() {
+        let mut params = no_params();
+        params.insert("num_branches".into(), "2".into());
+
+        let result = eval_primitive(
+            Primitive::Switch,
+            &[
+                Value::scalar_i64(-1),
+                Value::scalar_f64(10.0),
+                Value::scalar_f64(20.0),
+            ],
+            &params,
+        );
+        assert!(result.is_err(), "Switch with negative index should fail");
+    }
+
+    #[test]
+    fn test_switch_bool_index() {
+        let mut params = no_params();
+        params.insert("num_branches".into(), "2".into());
+
+        // false => branch 0
+        let result = eval_primitive(
+            Primitive::Switch,
+            &[
+                Value::Scalar(Literal::Bool(false)),
+                Value::scalar_f64(10.0),
+                Value::scalar_f64(20.0),
+            ],
+            &params,
+        )
+        .unwrap();
+        assert_eq!(result, Value::scalar_f64(10.0));
+
+        // true => branch 1
+        let result = eval_primitive(
+            Primitive::Switch,
+            &[
+                Value::Scalar(Literal::Bool(true)),
+                Value::scalar_f64(10.0),
+                Value::scalar_f64(20.0),
+            ],
+            &params,
+        )
+        .unwrap();
+        assert_eq!(result, Value::scalar_f64(20.0));
+    }
+
+    #[test]
+    fn test_switch_tensor_branches() {
+        let mut params = no_params();
+        params.insert("num_branches".into(), "2".into());
+
+        let t0 = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let t1 = Value::vector_f64(&[4.0, 5.0, 6.0]).unwrap();
+
+        let result = eval_primitive(
+            Primitive::Switch,
+            &[Value::scalar_i64(1), t0, t1.clone()],
+            &params,
+        )
+        .unwrap();
+        assert_eq!(result, t1);
+    }
+
+    // ── fori_loop tests ──────────────────────────────────────────────
+    #[test]
+    fn test_fori_loop_sum() {
+        // Sum 0..10 = 45
+        let result = eval_fori_loop(0, 10, Value::scalar_i64(0), |i, val| {
+            let current = val.as_i64_scalar().unwrap();
+            Ok(Value::scalar_i64(current + i))
+        })
+        .unwrap();
+        assert_eq!(result, Value::scalar_i64(45));
+    }
+
+    #[test]
+    fn test_fori_loop_zero_range() {
+        // lower == upper => no iterations, return init_val unchanged
+        let init = Value::scalar_f64(42.0);
+        let result = eval_fori_loop(5, 5, init.clone(), |_, _| {
+            panic!("body should not be called for empty range");
+        })
+        .unwrap();
+        assert_eq!(result, init);
+    }
+
+    #[test]
+    fn test_fori_loop_negative_range() {
+        // upper < lower => no iterations
+        let init = Value::scalar_f64(99.0);
+        let result = eval_fori_loop(10, 5, init.clone(), |_, _| {
+            panic!("body should not be called for negative range");
+        })
+        .unwrap();
+        assert_eq!(result, init);
+    }
+
+    #[test]
+    fn test_fori_loop_factorial() {
+        // Compute 5! = 120
+        let result = eval_fori_loop(1, 6, Value::scalar_i64(1), |i, val| {
+            let current = val.as_i64_scalar().unwrap();
+            Ok(Value::scalar_i64(current * i))
+        })
+        .unwrap();
+        assert_eq!(result, Value::scalar_i64(120));
+    }
+
+    #[test]
+    fn test_fori_loop_tensor_accumulation() {
+        // Accumulate into a tensor: add i to each element
+        let init = Value::vector_f64(&[0.0, 0.0, 0.0]).unwrap();
+        let result = eval_fori_loop(0, 3, init, |i, val| {
+            let offset = Value::vector_f64(&[i as f64, i as f64, i as f64]).unwrap();
+            eval_primitive(Primitive::Add, &[val, offset], &no_params())
+        })
+        .unwrap();
+        // Each element gets 0+1+2 = 3
+        assert_eq!(result, Value::vector_f64(&[3.0, 3.0, 3.0]).unwrap());
+    }
+
+    #[test]
+    fn test_fori_loop_body_error_propagation() {
+        let result = eval_fori_loop(0, 5, Value::scalar_i64(0), |i, _| {
+            if i == 3 {
+                Err(EvalError::Unsupported {
+                    primitive: Primitive::While,
+                    detail: "test error at i=3".into(),
+                })
+            } else {
+                Ok(Value::scalar_i64(i))
+            }
+        });
+        assert!(result.is_err(), "Error in body should propagate");
+    }
+
+    // ── Cbrt tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_cbrt_perfect_cube() {
+        let result = eval_primitive(Primitive::Cbrt, &[Value::scalar_f64(27.0)], &BTreeMap::new())
+            .unwrap();
+        assert!((result.as_f64_scalar().unwrap() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cbrt_negative() {
+        let result = eval_primitive(Primitive::Cbrt, &[Value::scalar_f64(-8.0)], &BTreeMap::new())
+            .unwrap();
+        assert!((result.as_f64_scalar().unwrap() - (-2.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cbrt_zero() {
+        let result = eval_primitive(Primitive::Cbrt, &[Value::scalar_f64(0.0)], &BTreeMap::new())
+            .unwrap();
+        assert!((result.as_f64_scalar().unwrap()).abs() < 1e-10);
+    }
+
+    // ── IsFinite tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_is_finite_normal() {
+        let result =
+            eval_primitive(Primitive::IsFinite, &[Value::scalar_f64(1.0)], &BTreeMap::new())
+                .unwrap();
+        assert_eq!(result, Value::Scalar(Literal::Bool(true)));
+    }
+
+    #[test]
+    fn test_is_finite_inf() {
+        let result = eval_primitive(
+            Primitive::IsFinite,
+            &[Value::scalar_f64(f64::INFINITY)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Scalar(Literal::Bool(false)));
+    }
+
+    #[test]
+    fn test_is_finite_nan() {
+        let result = eval_primitive(
+            Primitive::IsFinite,
+            &[Value::scalar_f64(f64::NAN)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Scalar(Literal::Bool(false)));
+    }
+
+    #[test]
+    fn test_is_finite_tensor() {
+        let tensor = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(4),
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(f64::INFINITY),
+                    Literal::from_f64(f64::NAN),
+                    Literal::from_f64(-42.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let result =
+            eval_primitive(Primitive::IsFinite, &[tensor], &BTreeMap::new()).unwrap();
+        match result {
+            Value::Tensor(t) => {
+                assert_eq!(t.dtype, DType::Bool);
+                assert_eq!(
+                    t.elements,
+                    vec![
+                        Literal::Bool(true),
+                        Literal::Bool(false),
+                        Literal::Bool(false),
+                        Literal::Bool(true),
+                    ]
+                );
+            }
+            _ => panic!("expected tensor"),
+        }
+    }
+
+    // ── IntegerPow tests ───────────────────────────────────────
+
+    #[test]
+    fn test_integer_pow_positive() {
+        let mut params = BTreeMap::new();
+        params.insert("exponent".into(), "4".into());
+        let result =
+            eval_primitive(Primitive::IntegerPow, &[Value::scalar_f64(3.0)], &params).unwrap();
+        assert!((result.as_f64_scalar().unwrap() - 81.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_integer_pow_zero() {
+        let mut params = BTreeMap::new();
+        params.insert("exponent".into(), "0".into());
+        let result =
+            eval_primitive(Primitive::IntegerPow, &[Value::scalar_f64(5.0)], &params).unwrap();
+        assert!((result.as_f64_scalar().unwrap() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_integer_pow_negative() {
+        let mut params = BTreeMap::new();
+        params.insert("exponent".into(), "-3".into());
+        let result =
+            eval_primitive(Primitive::IntegerPow, &[Value::scalar_f64(2.0)], &params).unwrap();
+        assert!((result.as_f64_scalar().unwrap() - 0.125).abs() < 1e-10);
+    }
+
+    // ── Nextafter tests ────────────────────────────────────────
+
+    #[test]
+    fn test_nextafter_up() {
+        let result = eval_primitive(
+            Primitive::Nextafter,
+            &[Value::scalar_f64(1.0), Value::scalar_f64(2.0)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let v = result.as_f64_scalar().unwrap();
+        assert!(v > 1.0, "nextafter(1.0, 2.0) should be > 1.0");
+        assert!(
+            v - 1.0 < 1e-15,
+            "nextafter(1.0, 2.0) should be very close to 1.0"
+        );
+    }
+
+    #[test]
+    fn test_nextafter_down() {
+        let result = eval_primitive(
+            Primitive::Nextafter,
+            &[Value::scalar_f64(1.0), Value::scalar_f64(0.0)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let v = result.as_f64_scalar().unwrap();
+        assert!(v < 1.0, "nextafter(1.0, 0.0) should be < 1.0");
+        assert!(
+            1.0 - v < 1e-15,
+            "nextafter(1.0, 0.0) should be very close to 1.0"
+        );
     }
 }

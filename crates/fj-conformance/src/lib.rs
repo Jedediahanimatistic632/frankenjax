@@ -355,6 +355,9 @@ pub enum FixtureValue {
     ScalarI64 { value: i64 },
     VectorF64 { values: Vec<f64> },
     VectorI64 { values: Vec<i64> },
+    TensorF64 { shape: Vec<u32>, values: Vec<f64> },
+    TensorI64 { shape: Vec<u32>, values: Vec<i64> },
+    TensorBool { shape: Vec<u32>, values: Vec<bool> },
 }
 
 impl FixtureValue {
@@ -366,6 +369,30 @@ impl FixtureValue {
                 .map_err(|err| format!("vector_f64 conversion failed: {err}")),
             Self::VectorI64 { values } => Value::vector_i64(values)
                 .map_err(|err| format!("vector_i64 conversion failed: {err}")),
+            Self::TensorF64 { shape, values } => {
+                let elements: Vec<fj_core::Literal> =
+                    values.iter().copied().map(fj_core::Literal::from_f64).collect();
+                let s = fj_core::Shape { dims: shape.clone() };
+                fj_core::TensorValue::new(fj_core::DType::F64, s, elements)
+                    .map(Value::Tensor)
+                    .map_err(|e| format!("tensor_f64 conversion failed: {e}"))
+            }
+            Self::TensorI64 { shape, values } => {
+                let elements: Vec<fj_core::Literal> =
+                    values.iter().copied().map(fj_core::Literal::I64).collect();
+                let s = fj_core::Shape { dims: shape.clone() };
+                fj_core::TensorValue::new(fj_core::DType::I64, s, elements)
+                    .map(Value::Tensor)
+                    .map_err(|e| format!("tensor_i64 conversion failed: {e}"))
+            }
+            Self::TensorBool { shape, values } => {
+                let elements: Vec<fj_core::Literal> =
+                    values.iter().copied().map(fj_core::Literal::Bool).collect();
+                let s = fj_core::Shape { dims: shape.clone() };
+                fj_core::TensorValue::new(fj_core::DType::Bool, s, elements)
+                    .map(Value::Tensor)
+                    .map_err(|e| format!("tensor_bool conversion failed: {e}"))
+            }
         }
     }
 
@@ -398,6 +425,44 @@ impl FixtureValue {
                     .zip(values.iter())
                     .all(|(actual, expected)| actual.as_i64().is_some_and(|v| v == *expected))
             }),
+            Self::TensorF64 { shape, values } => actual.as_tensor().is_some_and(|tensor| {
+                tensor.shape.dims == *shape
+                    && tensor.to_f64_vec().is_some_and(|actual_values| {
+                        values.len() == actual_values.len()
+                            && values
+                                .iter()
+                                .zip(actual_values.iter())
+                                .all(|(e, a)| approx_equal(*e, *a, atol, rtol))
+                    })
+            }),
+            Self::TensorI64 { shape, values } => actual.as_tensor().is_some_and(|tensor| {
+                tensor.shape.dims == *shape
+                    && tensor.elements.len() == values.len()
+                    && tensor
+                        .elements
+                        .iter()
+                        .zip(values.iter())
+                        .all(|(a, e)| a.as_i64().is_some_and(|v| v == *e))
+            }),
+            Self::TensorBool { shape, values } => actual.as_tensor().is_some_and(|tensor| {
+                tensor.shape.dims == *shape
+                    && tensor.elements.len() == values.len()
+                    && tensor.elements.iter().zip(values.iter()).all(|(a, e)| {
+                        matches!(a, fj_core::Literal::Bool(b) if *b == *e)
+                    })
+            }),
+        }
+    }
+
+    /// Return the rank of this fixture value.
+    #[must_use]
+    pub fn rank(&self) -> usize {
+        match self {
+            Self::ScalarF64 { .. } | Self::ScalarI64 { .. } => 0,
+            Self::VectorF64 { .. } | Self::VectorI64 { .. } => 1,
+            Self::TensorF64 { shape, .. }
+            | Self::TensorI64 { shape, .. }
+            | Self::TensorBool { shape, .. } => shape.len(),
         }
     }
 }
@@ -729,8 +794,13 @@ impl Default for ToleranceReport {
 #[must_use]
 pub fn fixture_value_dtype(value: &FixtureValue) -> fj_core::DType {
     match value {
-        FixtureValue::ScalarF64 { .. } | FixtureValue::VectorF64 { .. } => fj_core::DType::F64,
-        FixtureValue::ScalarI64 { .. } | FixtureValue::VectorI64 { .. } => fj_core::DType::I64,
+        FixtureValue::ScalarF64 { .. }
+        | FixtureValue::VectorF64 { .. }
+        | FixtureValue::TensorF64 { .. } => fj_core::DType::F64,
+        FixtureValue::ScalarI64 { .. }
+        | FixtureValue::VectorI64 { .. }
+        | FixtureValue::TensorI64 { .. } => fj_core::DType::I64,
+        FixtureValue::TensorBool { .. } => fj_core::DType::Bool,
     }
 }
 
@@ -904,6 +974,193 @@ pub fn emit_parity_markdown(report: &TransformParityReport) -> String {
     }
 
     out
+}
+
+// ── V1 Parity Report (spec Section 8.3) ─────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FamilyReport {
+    pub total: usize,
+    pub matched: usize,
+    pub mismatched: usize,
+    pub cases: Vec<FamilyCaseEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FamilyCaseEntry {
+    pub case_id: String,
+    pub matched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParityReportSummary {
+    pub total: usize,
+    pub pass_rate: f64,
+    pub gate: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParityReportV1 {
+    pub schema_version: String,
+    pub timestamp: String,
+    pub fj_version: String,
+    pub oracle_version: String,
+    pub mode: String,
+    pub families: std::collections::BTreeMap<String, FamilyReport>,
+    pub summary: ParityReportSummary,
+}
+
+impl ParityReportV1 {
+    /// Build a V1 parity report from a TransformParityReport.
+    #[must_use]
+    pub fn from_transform_report(
+        report: &TransformParityReport,
+        mode: &str,
+        fj_version: &str,
+        oracle_version: &str,
+    ) -> Self {
+        use std::collections::BTreeMap;
+
+        let timestamp = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            format!("{now}")
+        };
+
+        // Group cases by family
+        let mut families: BTreeMap<String, Vec<&TransformCaseReport>> = BTreeMap::new();
+        for case in &report.reports {
+            let family_name = match case.family {
+                FixtureFamily::Jit => "jit",
+                FixtureFamily::Grad => "grad",
+                FixtureFamily::Vmap => "vmap",
+                FixtureFamily::Lax => "lax",
+                FixtureFamily::Random => "random",
+            };
+            families
+                .entry(family_name.to_owned())
+                .or_default()
+                .push(case);
+        }
+
+        let family_reports: BTreeMap<String, FamilyReport> = families
+            .into_iter()
+            .map(|(name, cases)| {
+                let total = cases.len();
+                let matched = cases.iter().filter(|c| c.matched).count();
+                let mismatched = total - matched;
+                let entries = cases
+                    .iter()
+                    .map(|c| FamilyCaseEntry {
+                        case_id: c.case_id.clone(),
+                        matched: c.matched,
+                        expected: if c.matched {
+                            None
+                        } else {
+                            Some(c.expected_json.clone())
+                        },
+                        actual: if c.matched {
+                            None
+                        } else {
+                            c.actual_json.clone()
+                        },
+                        error: c.error.clone(),
+                    })
+                    .collect();
+                (
+                    name,
+                    FamilyReport {
+                        total,
+                        matched,
+                        mismatched,
+                        cases: entries,
+                    },
+                )
+            })
+            .collect();
+
+        let total = report.total_cases;
+        let pass_rate = if total == 0 {
+            1.0
+        } else {
+            report.matched_cases as f64 / total as f64
+        };
+        let gate = if pass_rate >= 1.0 {
+            "pass".to_owned()
+        } else {
+            "fail".to_owned()
+        };
+
+        Self {
+            schema_version: "frankenjax.parity-report.v1".to_owned(),
+            timestamp,
+            fj_version: fj_version.to_owned(),
+            oracle_version: oracle_version.to_owned(),
+            mode: mode.to_owned(),
+            families: family_reports,
+            summary: ParityReportSummary {
+                total,
+                pass_rate,
+                gate,
+            },
+        }
+    }
+
+    /// Emit the report as pretty-printed JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Emit a markdown summary of the report.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# Parity Report V1\n\n");
+        out.push_str(&format!("**Mode**: {}\n\n", self.mode));
+        out.push_str(&format!(
+            "**FrankenJAX**: {} | **Oracle**: {}\n\n",
+            self.fj_version, self.oracle_version
+        ));
+        out.push_str("## Summary\n\n");
+        out.push_str("| Metric | Value |\n");
+        out.push_str("|---|---|\n");
+        out.push_str(&format!("| Total Cases | {} |\n", self.summary.total));
+        out.push_str(&format!(
+            "| Pass Rate | {:.2}% |\n",
+            self.summary.pass_rate * 100.0
+        ));
+        out.push_str(&format!("| Gate | **{}** |\n\n", self.summary.gate));
+        out.push_str("## Per-Family Breakdown\n\n");
+        out.push_str("| Family | Total | Matched | Mismatched |\n");
+        out.push_str("|---|---|---|---|\n");
+        for (name, family) in &self.families {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                name, family.total, family.matched, family.mismatched
+            ));
+        }
+        out
+    }
+
+    /// Returns true if the gate passes (100% parity).
+    #[must_use]
+    pub fn gate_passes(&self) -> bool {
+        self.summary.gate == "pass"
+    }
+
+    /// CI exit code: 0 if gate passes, 1 if it fails.
+    #[must_use]
+    pub fn ci_exit_code(&self) -> i32 {
+        if self.gate_passes() { 0 } else { 1 }
+    }
 }
 
 fn default_python_for_repo() -> Option<PathBuf> {
@@ -1133,8 +1390,18 @@ fn record_fixture_comparison(
                 }
             }
         }
-        FixtureValue::ScalarI64 { .. } | FixtureValue::VectorI64 { .. } => {
-            // Integer comparisons are exact, no tolerance reporting needed
+        FixtureValue::TensorF64 { values, .. } => {
+            if let Some(actual_vals) = actual.as_tensor().and_then(|t| t.to_f64_vec()) {
+                for (elem_idx, (exp, act)) in values.iter().zip(actual_vals.iter()).enumerate() {
+                    report.record(case_id, output_idx, elem_idx, *exp, *act, tolerance);
+                }
+            }
+        }
+        FixtureValue::ScalarI64 { .. }
+        | FixtureValue::VectorI64 { .. }
+        | FixtureValue::TensorI64 { .. }
+        | FixtureValue::TensorBool { .. } => {
+            // Integer/bool comparisons are exact, no tolerance reporting needed
         }
     }
 }
@@ -1144,6 +1411,9 @@ fn value_shape_fingerprint(expected: &FixtureValue) -> String {
         FixtureValue::ScalarF64 { .. } | FixtureValue::ScalarI64 { .. } => "scalar".to_owned(),
         FixtureValue::VectorF64 { values } => format!("vector:{}", values.len()),
         FixtureValue::VectorI64 { values } => format!("vector:{}", values.len()),
+        FixtureValue::TensorF64 { shape, .. }
+        | FixtureValue::TensorI64 { shape, .. } => format!("tensor:{shape:?}"),
+        FixtureValue::TensorBool { shape, .. } => format!("tensor:{shape:?}"),
     }
 }
 
@@ -1161,8 +1431,13 @@ fn value_shape_runtime(actual: &Value) -> String {
 
 fn value_type_fingerprint(expected: &FixtureValue) -> &'static str {
     match expected {
-        FixtureValue::ScalarF64 { .. } | FixtureValue::VectorF64 { .. } => "f64",
-        FixtureValue::ScalarI64 { .. } | FixtureValue::VectorI64 { .. } => "i64",
+        FixtureValue::ScalarF64 { .. }
+        | FixtureValue::VectorF64 { .. }
+        | FixtureValue::TensorF64 { .. } => "f64",
+        FixtureValue::ScalarI64 { .. }
+        | FixtureValue::VectorI64 { .. }
+        | FixtureValue::TensorI64 { .. } => "i64",
+        FixtureValue::TensorBool { .. } => "bool",
     }
 }
 

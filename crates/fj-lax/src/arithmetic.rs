@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
+use std::collections::BTreeMap;
 
 use crate::EvalError;
 use crate::type_promotion::{binary_literal_op, promote_dtype};
@@ -723,6 +724,185 @@ pub(crate) fn eval_dot(inputs: &[Value]) -> Result<Value, EvalError> {
         _ => Err(EvalError::Unsupported {
             primitive,
             detail: "dot expects either two scalars or two vectors".to_owned(),
+        }),
+    }
+}
+
+/// IsFinite: returns Bool indicating whether each element is finite (not NaN or Inf).
+pub(crate) fn eval_is_finite(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+
+    match &inputs[0] {
+        Value::Scalar(literal) => {
+            let value = literal.as_f64().ok_or(EvalError::TypeMismatch {
+                primitive,
+                detail: "expected numeric scalar",
+            })?;
+            Ok(Value::Scalar(Literal::Bool(value.is_finite())))
+        }
+        Value::Tensor(tensor) => {
+            let elements = tensor
+                .elements
+                .iter()
+                .map(|literal| {
+                    literal
+                        .as_f64()
+                        .map(|v| Literal::Bool(v.is_finite()))
+                        .ok_or(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "expected numeric tensor elements",
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(Value::Tensor(TensorValue::new(
+                DType::Bool,
+                tensor.shape.clone(),
+                elements,
+            )?))
+        }
+    }
+}
+
+/// IntegerPow: x.powi(n) where n is an integer exponent from params.
+pub(crate) fn eval_integer_pow(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+
+    let exponent: i32 = params
+        .get("exponent")
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or(EvalError::Unsupported {
+            primitive,
+            detail: "integer_pow requires 'exponent' param".to_owned(),
+        })?;
+
+    match &inputs[0] {
+        Value::Scalar(literal) => {
+            let value = literal.as_f64().ok_or(EvalError::TypeMismatch {
+                primitive,
+                detail: "expected numeric scalar",
+            })?;
+            Ok(Value::scalar_f64(value.powi(exponent)))
+        }
+        Value::Tensor(tensor) => {
+            let elements = tensor
+                .elements
+                .iter()
+                .map(|literal| {
+                    literal
+                        .as_f64()
+                        .map(|v| Literal::from_f64(v.powi(exponent)))
+                        .ok_or(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "expected numeric tensor elements",
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(Value::Tensor(TensorValue::new(
+                DType::F64,
+                tensor.shape.clone(),
+                elements,
+            )?))
+        }
+    }
+}
+
+/// Nextafter: IEEE 754 next representable float value from x towards y.
+pub(crate) fn eval_nextafter(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    if inputs.len() != 2 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 2,
+            actual: inputs.len(),
+        });
+    }
+
+    fn next_after(x: f64, y: f64) -> f64 {
+        if x.is_nan() || y.is_nan() {
+            return f64::NAN;
+        }
+        if x == y {
+            return y;
+        }
+        if x == 0.0 {
+            // Smallest subnormal towards y's sign
+            if y > 0.0 {
+                return f64::from_bits(1);
+            }
+            return f64::from_bits(1 | (1_u64 << 63));
+        }
+        let bits = x.to_bits();
+        let result_bits = if (x < y) == (x > 0.0) {
+            bits + 1
+        } else {
+            bits - 1
+        };
+        f64::from_bits(result_bits)
+    }
+
+    match (&inputs[0], &inputs[1]) {
+        (Value::Scalar(lhs), Value::Scalar(rhs)) => {
+            let x = lhs.as_f64().ok_or(EvalError::TypeMismatch {
+                primitive,
+                detail: "expected numeric scalar",
+            })?;
+            let y = rhs.as_f64().ok_or(EvalError::TypeMismatch {
+                primitive,
+                detail: "expected numeric scalar",
+            })?;
+            Ok(Value::scalar_f64(next_after(x, y)))
+        }
+        (Value::Tensor(lhs), Value::Tensor(rhs)) => {
+            if lhs.shape != rhs.shape {
+                return Err(EvalError::ShapeMismatch {
+                    primitive,
+                    left: lhs.shape.clone(),
+                    right: rhs.shape.clone(),
+                });
+            }
+            let elements = lhs
+                .elements
+                .iter()
+                .zip(rhs.elements.iter())
+                .map(|(l, r)| -> Result<Literal, EvalError> {
+                    let x = l.as_f64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "expected numeric tensor elements",
+                    })?;
+                    let y = r.as_f64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "expected numeric tensor elements",
+                    })?;
+                    Ok(Literal::from_f64(next_after(x, y)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(Value::Tensor(TensorValue::new(
+                DType::F64,
+                lhs.shape.clone(),
+                elements,
+            )?))
+        }
+        _ => Err(EvalError::Unsupported {
+            primitive,
+            detail: "nextafter requires matching scalar/tensor kinds".to_owned(),
         }),
     }
 }

